@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Install Nimblex
+Comment=Install Nimblex Linux to a USB stick or alongside Windows
+Exec=nimblex-installer
+Icon=drive-removable-media
+Terminal=false
+Categories=System;Settings;
+StartupNotify=true

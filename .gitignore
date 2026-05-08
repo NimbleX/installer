@@ -1,0 +1,23 @@
+/target
+**/*.rs.bk
+Cargo.lock
+*.swp
+*.swo
+*.rs~
+.DS_Store
+
+# Stray build artefacts from ad-hoc rustc invocations on the workspace
+# root (e.g. test_scan.rs experiments) that are not part of the build.
+/test_scan
+/test_scan.rs
+/test_scan.*.o
+/test_scan.*.rcgu.o
+
+# Staging output of packaging/install.sh
+/stage
+
+# Vim undo / patch-conflict leftovers
+.*.un~
+*.un~
+*.orig
+*.rej

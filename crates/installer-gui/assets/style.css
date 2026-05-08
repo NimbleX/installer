@@ -1,0 +1,512 @@
+/* Nimblex installer — dark theme.
+   Reference frames in plans/2026-05-05-nimblex-installer2-redesign-v1.md.
+   Tokens defined in tokens.css; this file consumes them only. */
+
+/* ---------- Window backdrop ---------- */
+window.nimblex-window {
+    background: @nx-bg;
+    color: @nx-fg;
+    font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    font-size: 15px;
+}
+
+window.nimblex-window label,
+window.nimblex-window button {
+    font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+
+/* ---------- App card ---------- */
+.app-card {
+    background: @nx-bg-card;
+    border: 1px solid @nx-frame;
+    border-radius: 16px;
+    padding: 0;
+    margin: 32px;
+    /* Subtle drop shadow via box-shadow (GTK supports this on widgets). */
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
+}
+
+/* ---------- Header (avatar + title + stepper) ---------- */
+.app-header {
+    padding: 22px 28px;
+    border-bottom: 1px solid @nx-frame;
+}
+
+.app-header-avatar {
+    background: @nx-accent;
+    color: @nx-accent-fg;
+    font-weight: 800;
+    font-size: 16px;
+    border-radius: 999px;
+    min-width: 32px;
+    min-height: 32px;
+    padding: 4px 0;
+}
+
+.app-header-title {
+    font-size: 18px;
+    font-weight: 700;
+    color: @nx-fg;
+}
+
+.stepper {
+    color: @nx-fg-muted;
+    font-size: 14px;
+}
+
+.stepper-step {
+    color: @nx-fg-muted;
+    padding: 0 6px;
+    font-weight: 600;
+}
+
+.stepper-step.active {
+    color: @nx-accent;
+    font-weight: 700;
+}
+
+.stepper-dot {
+    color: @nx-fg-muted;
+    padding: 0 4px;
+    font-size: 16px;
+}
+
+.header-cmd-btn {
+    padding: 6px 10px;
+    font-family: "JetBrains Mono", "DejaVu Sans Mono", monospace;
+    font-size: 13px;
+    font-weight: 700;
+    border-color: @nx-frame;
+    color: @nx-fg-muted;
+}
+.header-cmd-btn:hover {
+    color: @nx-accent;
+    border-color: @nx-accent;
+}
+
+/* ---------- Screen body ---------- */
+.screen-body {
+    padding: 24px 28px 16px 28px;
+}
+
+.screen-h1 {
+    font-size: 22px;
+    font-weight: 700;
+    color: @nx-fg;
+}
+
+.screen-subtitle {
+    font-size: 14px;
+    color: @nx-fg-muted;
+    margin-bottom: 8px;
+}
+
+/* ---------- Disk cards ---------- */
+.disks-row {
+    margin-top: 8px;
+    background: transparent;
+}
+
+.disks-row > flowboxchild,
+.disk-card-cell {
+    padding: 0;
+    background: transparent;
+    border: none;
+    box-shadow: none;
+    outline: none;
+}
+
+.disks-row > flowboxchild:selected,
+.disk-card-cell:selected {
+    background: transparent;
+}
+
+.disk-card {
+    background: @nx-bg-elev;
+    border: 1.5px solid @nx-frame;
+    border-radius: 14px;
+    padding: 14px 16px;
+    /* Override default ToggleButton chrome */
+    box-shadow: none;
+    outline: none;
+    min-height: 84px;
+    /* Cap so cards don't vexpand to fill the FlowBox row. */
+    /* (GTK has no max-height in CSS; valign=Start on FlowBox is the real fix.) */
+    transition: border-color 150ms ease, background 150ms ease;
+}
+
+.disk-card:hover {
+    border-color: @nx-frame-strong;
+    background: @nx-bg-elev-2;
+}
+
+.disk-card:checked,
+.disk-card.selected {
+    border-color: @nx-accent;
+    background: @nx-accent-soft;
+}
+
+/* Inline "Windows" pill on the disk card title row. */
+.win-pill {
+    background: transparent;
+    color: @nx-fg-muted;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    padding: 2px 8px;
+    border-radius: 6px;
+    border: 1px solid @nx-frame-strong;
+}
+
+.disk-card-icon {
+    color: @nx-fg-muted;
+    -gtk-icon-size: 32px;
+    min-width: 32px;
+    min-height: 32px;
+}
+
+.disk-card:checked .disk-card-icon,
+.disk-card.selected .disk-card-icon {
+    color: @nx-accent;
+}
+
+.disk-card-title {
+    font-size: 16px;
+    font-weight: 700;
+    color: @nx-fg;
+}
+
+.disk-card-meta {
+    font-size: 13px;
+    color: @nx-fg-muted;
+}
+
+.disk-usage-bar {
+    min-height: 4px;
+}
+.disk-usage-bar trough {
+    background: @nx-bg;
+    border-radius: 999px;
+    min-height: 4px;
+}
+.disk-usage-bar progress {
+    background: @nx-fg-dim;
+    border-radius: 999px;
+    min-height: 4px;
+}
+
+/* ---------- Mode toggle (Alongside / Erase) ---------- */
+.mode-toggle {
+    background: @nx-bg-elev;
+    border: 1px solid @nx-frame;
+    border-radius: 10px;
+    padding: 4px;
+    margin-top: 16px;
+}
+
+.mode-toggle-btn {
+    background: transparent;
+    border: none;
+    color: @nx-fg-muted;
+    font-weight: 600;
+    font-size: 13px;
+    padding: 10px 16px;
+    border-radius: 8px;
+    box-shadow: none;
+}
+
+.mode-toggle-btn:hover {
+    background: @nx-bg-elev-2;
+    color: @nx-fg;
+}
+
+.mode-toggle-btn:checked {
+    background: @nx-accent;
+    color: @nx-accent-fg;
+}
+
+.mode-toggle-btn:disabled {
+    color: @nx-fg-dim;
+}
+
+/* ---------- Partition preview ---------- */
+.preview-panel {
+    background: @nx-bg-elev;
+    border: 1px solid @nx-frame;
+    border-radius: 12px;
+    padding: 14px 16px;
+    margin-top: 16px;
+}
+
+.preview-title {
+    font-size: 13px;
+    color: @nx-fg-muted;
+    margin-bottom: 8px;
+}
+
+/* ---------- Reclaim slider ---------- */
+.reclaim-row {
+    margin-top: 14px;
+}
+
+.reclaim-label {
+    font-size: 14px;
+    color: @nx-fg;
+}
+
+.reclaim-value {
+    font-size: 16px;
+    font-weight: 700;
+    color: @nx-accent;
+}
+
+scale.reclaim {
+    min-height: 28px;
+    padding: 0;
+    margin: 4px 0;
+}
+
+scale.reclaim trough {
+    background: @nx-windows-soft;
+    border: none;
+    min-height: 10px;
+    border-radius: 999px;
+}
+
+scale.reclaim highlight {
+    background: @nx-accent;
+    border-radius: 999px;
+    min-height: 10px;
+    min-width: 12px;
+}
+
+scale.reclaim slider {
+    min-width: 22px;
+    min-height: 22px;
+    background: #ffffff;
+    border-radius: 999px;
+    border: 3px solid @nx-accent;
+    box-shadow: 0 2px 6px rgba(0,0,0,0.4);
+}
+
+scale.reclaim slider:hover { background: #f0fffa; }
+
+/* ---------- Info row ---------- */
+.info-row {
+    color: @nx-fg-muted;
+    font-size: 13px;
+    margin-top: 10px;
+}
+
+.info-icon {
+    color: @nx-fg-dim;
+}
+
+/* ---------- Understand checkbox ---------- */
+.understand {
+    margin-top: 14px;
+    color: @nx-fg;
+    font-size: 13px;
+}
+
+.understand check {
+    background: @nx-bg-elev;
+    border: 1.5px solid @nx-frame-strong;
+    border-radius: 4px;
+    min-width: 16px;
+    min-height: 16px;
+}
+
+.understand check:checked {
+    background: @nx-accent;
+    border-color: @nx-accent;
+    color: @nx-accent-fg;
+}
+
+/* ---------- Footer ---------- */
+.app-footer {
+    padding: 14px 28px;
+    border-top: 1px solid @nx-frame;
+    background: alpha(@nx-bg, 0.0);
+}
+
+.footer-link {
+    background: transparent;
+    border: none;
+    color: @nx-fg-muted;
+    font-size: 14px;
+    padding: 10px 14px;
+    box-shadow: none;
+}
+
+.footer-link:hover { color: @nx-fg; }
+
+.btn-secondary {
+    background: transparent;
+    border: 1px solid @nx-frame-strong;
+    color: @nx-fg;
+    border-radius: 999px;
+    padding: 10px 22px;
+    font-size: 14px;
+    box-shadow: none;
+}
+
+.btn-secondary:hover { border-color: @nx-accent; color: @nx-accent; }
+
+.btn-primary {
+    background: @nx-accent;
+    color: @nx-accent-fg;
+    border: none;
+    border-radius: 999px;
+    padding: 11px 24px;
+    font-size: 15px;
+    font-weight: 700;
+    box-shadow: none;
+}
+
+.btn-primary:hover { background: @nx-accent-hover; }
+.btn-primary:active { background: @nx-accent-press; }
+.btn-primary:disabled {
+    background: alpha(@nx-accent, 0.25);
+    color: alpha(@nx-accent-fg, 0.55);
+}
+
+/* ---------- Confirm overlay ---------- */
+.overlay-bg {
+    background: alpha(@nx-bg, 0.65);
+}
+
+.overlay-sheet {
+    background: @nx-bg-card;
+    border-top: 1px solid @nx-frame;
+    border-radius: 16px;
+    padding: 24px 28px;
+}
+
+.overlay-title {
+    font-size: 16px;
+    font-weight: 700;
+    color: @nx-fg;
+}
+
+.overlay-body {
+    font-size: 14px;
+    color: @nx-fg-muted;
+    margin: 8px 0 20px 0;
+}
+
+/* ---------- Install screen ---------- */
+.install-stage {
+    padding: 36px 28px 16px 28px;
+}
+
+.progress-percent {
+    font-size: 38px;
+    font-weight: 700;
+    color: @nx-fg;
+}
+
+.progress-caption {
+    font-size: 14px;
+    font-weight: 500;
+    color: @nx-fg-muted;
+    letter-spacing: 0.02em;
+}
+
+.progress-error-icon {
+    color: @nx-error;
+}
+.title-success {
+    color: @nx-accent;
+}
+
+.title-error {
+    color: #e5484d;
+}
+
+.log-pane {
+    background: #06090f;
+    border: 1px solid @nx-frame;
+    border-radius: 10px;
+    padding: 14px 16px;
+    margin: 18px 0;
+}
+
+.log-pane textview,
+.log-pane textview text {
+    background: transparent;
+    color: @nx-fg-muted;
+    font-family: "JetBrains Mono", "DejaVu Sans Mono", monospace;
+    font-size: 12px;
+}
+
+.log-pane-header {
+    color: @nx-fg-dim;
+    font-family: monospace;
+    font-size: 13px;
+}
+
+.wait-footer {
+    padding: 14px 28px;
+    border-top: 1px solid @nx-frame;
+    color: @nx-fg-muted;
+    font-size: 13px;
+}
+
+/* ---------- Warning bar ---------- */
+.warning-bar {
+    background: alpha(@nx-warn, 0.12);
+    color: @nx-warn;
+    border: 1px solid alpha(@nx-warn, 0.4);
+    border-radius: 8px;
+    padding: 10px 14px;
+    font-size: 12.5px;
+}
+
+/* ---------- Misc ---------- */
+.dim { color: @nx-fg-muted; }
+
+/* ---------- Mode pill (auto-decided action) ---------- */
+.mode-pill {
+    margin-top: 6px;
+    padding: 12px 16px;
+    border-radius: 12px;
+    font-size: 14px;
+    color: @nx-fg;
+    border: 1px solid @nx-frame;
+    background: @nx-bg-elev;
+}
+
+.mode-pill-alongside {
+    border-color: alpha(#4a90e2, 0.55);
+    background: alpha(#4a90e2, 0.10);
+}
+
+.mode-pill-erase {
+    border-color: alpha(@nx-warn, 0.55);
+    background: alpha(@nx-warn, 0.10);
+}
+
+/* ---------- Partition preview strip captions / legend ---------- */
+.preview-stack {
+    margin-top: 4px;
+}
+
+.strip-caption {
+    color: @nx-fg-dim;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.16em;
+    margin-top: 6px;
+    margin-bottom: 2px;
+}
+
+.strip-caption-after {
+    color: @nx-accent;
+}
+
+.preview-legend {
+    color: @nx-fg-muted;
+    font-size: 12px;
+    margin-top: 6px;
+}

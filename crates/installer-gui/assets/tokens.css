@@ -1,0 +1,35 @@
+/* Design tokens — single source of truth for all colors, sizes, radii.
+   Imported first; every component-level rule below references @nx-* names.
+   Reference frames: plans/2026-05-05-nimblex-installer2-redesign-v1.md. */
+
+/* ---------- Surfaces ---------- */
+@define-color nx-bg            #0a0f1c;  /* viewport backdrop */
+@define-color nx-bg-card       #0f1626;  /* main installer card */
+@define-color nx-bg-elev       #152038;  /* nested panels (preview, log) */
+@define-color nx-bg-elev-2     #1c2945;  /* hover / inactive segmented btn */
+@define-color nx-frame         #1f2a44;  /* card and panel border */
+@define-color nx-frame-strong  #2c3a5c;  /* hover / focus border */
+
+/* ---------- Text ---------- */
+@define-color nx-fg            #e6ecf5;
+@define-color nx-fg-muted      #8895a8;
+@define-color nx-fg-dim        #5a6678;
+
+/* ---------- Accent (teal-mint) ---------- */
+@define-color nx-accent        #3bd4a3;
+@define-color nx-accent-hover  #4fe4b3;
+@define-color nx-accent-press  #2bbe8e;
+@define-color nx-accent-soft   #1a4438;  /* selected card fill */
+@define-color nx-accent-fg     #04140e;  /* text on accent buttons */
+
+/* ---------- Partition / role colors ---------- */
+@define-color nx-windows       #2563eb;  /* Windows segment */
+@define-color nx-windows-soft  #1e3a8a;  /* Windows soft */
+@define-color nx-linux         #8b5cf6;  /* Existing Linux segment */
+@define-color nx-protected     #475569;  /* EFI / MSR / Recovery */
+@define-color nx-data          #4a86c8;  /* generic data partition */
+
+/* ---------- Status ---------- */
+@define-color nx-warn          #ffc857;
+@define-color nx-danger        #ff6b6b;
+@define-color nx-ok            #3bd4a3;
