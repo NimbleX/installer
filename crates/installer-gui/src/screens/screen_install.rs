@@ -42,13 +42,30 @@ fn is_noise_line(line: &str) -> bool {
 #[allow(dead_code)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum HelperEvent {
-    PlanAccepted { steps: usize },
-    StepStart { index: usize, label: String },
-    Stdout { index: usize, line: String },
-    Stderr { index: usize, line: String },
-    StepDone { index: usize, exit_code: i32 },
+    PlanAccepted {
+        steps: usize,
+    },
+    StepStart {
+        index: usize,
+        label: String,
+    },
+    Stdout {
+        index: usize,
+        line: String,
+    },
+    Stderr {
+        index: usize,
+        line: String,
+    },
+    StepDone {
+        index: usize,
+        exit_code: i32,
+    },
     Complete,
-    Error { index: Option<usize>, message: String },
+    Error {
+        index: Option<usize>,
+        message: String,
+    },
 }
 
 #[derive(Clone)]
@@ -85,7 +102,7 @@ impl ScreenInstall {
         progress.set_caption("");
         stage.append(progress.widget());
 
-        let title = Label::new(Some("Installing Nimblex"));
+        let title = Label::new(Some("Installing NimbleX"));
         title.add_css_class("screen-h1");
         title.set_halign(Align::Center);
         stage.append(&title);
@@ -105,12 +122,12 @@ impl ScreenInstall {
         let spacer = GtkBox::new(Orientation::Horizontal, 0);
         spacer.set_hexpand(true);
         footer.append(&spacer);
-        
+
         let back_btn = Button::with_label("Back");
         back_btn.add_css_class("btn-secondary");
         back_btn.set_visible(false);
         footer.append(&back_btn);
-        
+
         let copy_log_btn = Button::with_label("Copy Log");
         copy_log_btn.add_css_class("btn-secondary");
         copy_log_btn.set_visible(false);
@@ -128,11 +145,11 @@ impl ScreenInstall {
                 win.close();
             }
         });
-        
+
         let stack_back = stack.clone();
         let back_btn_clone = back_btn.clone();
         let copy_log_btn_clone = copy_log_btn.clone();
-        
+
         let started_clone = Rc::new(Cell::new(false));
         let started_back = started_clone.clone();
         let progress_back = progress.clone();
@@ -148,7 +165,7 @@ impl ScreenInstall {
             started_back.set(false);
             progress_back.reset();
             log_back.clear();
-            title_back.set_text("Installing Nimblex");
+            title_back.set_text("Installing NimbleX");
             title_back.remove_css_class("title-error");
             title_back.remove_css_class("title-success");
             subtitle_back.set_text("");
@@ -156,7 +173,7 @@ impl ScreenInstall {
             finish_back.set_sensitive(false);
             back_btn_back.set_visible(false);
             copy_log_back.set_visible(false);
-            
+
             // Go back to destination screen
             stack_back.set_visible_child_name(crate::app::STACK_DEST);
         });
@@ -310,9 +327,8 @@ impl ScreenInstall {
                 if let Some(rest) = line.strip_prefix("PROGRESS:") {
                     if let Ok(pct) = rest.trim().parse::<u32>() {
                         let sub = (pct as f64 / 100.0).clamp(0.0, 1.0);
-                        self.progress.set_progress(
-                            cur_step_base.get() + sub * cur_step_span.get(),
-                        );
+                        self.progress
+                            .set_progress(cur_step_base.get() + sub * cur_step_span.get());
                     }
                 } else if !is_noise_line(&line) {
                     self.log.append_line(&line);
@@ -332,7 +348,7 @@ impl ScreenInstall {
                 self.progress.set_caption("Done");
                 self.title.set_text("Install complete");
                 self.title.add_css_class("title-success");
-                self.subtitle.set_text("Reboot to start Nimblex.");
+                self.subtitle.set_text("Reboot to start NimbleX.");
                 self.finish_btn.set_sensitive(true);
                 self.copy_log_btn.set_visible(true);
             }
@@ -404,9 +420,39 @@ fn run_helper(plan_json: &str, tx: mpsc::Sender<WorkerMsg>) {
         let _ = stdin.write_all(plan_json.as_bytes());
     }
 
+    // Persist the full helper output to a file so a failed install can be
+    // diagnosed after the fact (the GUI log pane filters noise and scrolls).
+    let mut logf = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open("/tmp/nimblex-install.log")
+        .ok();
+
+    // Drain the helper's own stderr on a separate thread into the same log
+    // file (prevents the pipe filling and captures panics / unexpected output).
+    if let Some(stderr) = child.stderr.take() {
+        std::thread::spawn(move || {
+            let mut errf = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open("/tmp/nimblex-install.err")
+                .ok();
+            let reader = BufReader::new(stderr);
+            for line in reader.lines().map_while(Result::ok) {
+                if let Some(f) = errf.as_mut() {
+                    let _ = writeln!(f, "{}", line);
+                }
+            }
+        });
+    }
+
     if let Some(stdout) = child.stdout.take() {
         let reader = BufReader::new(stdout);
         for line in reader.lines().map_while(Result::ok) {
+            if let Some(f) = logf.as_mut() {
+                let _ = writeln!(f, "{}", line);
+            }
             match serde_json::from_str::<HelperEvent>(&line) {
                 Ok(ev) => {
                     let _ = tx.send(WorkerMsg::Event(ev));

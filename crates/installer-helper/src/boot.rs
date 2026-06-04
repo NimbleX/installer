@@ -135,9 +135,17 @@ fn stage_kernel_and_initrd(mnt_esp: &Path, kernel: &Path, initrd: &Path) -> Resu
     fs::create_dir_all(&nx)?;
     let dst_k = nx.join("vmlinuz");
     let dst_i = nx.join("initrd.img");
-    println!("Copying kernel  {} -> {}", kernel.display(), dst_k.display());
+    println!(
+        "Copying kernel  {} -> {}",
+        kernel.display(),
+        dst_k.display()
+    );
     fs::copy(kernel, &dst_k).with_context(|| format!("copy kernel to {}", dst_k.display()))?;
-    println!("Copying initrd  {} -> {}", initrd.display(), dst_i.display());
+    println!(
+        "Copying initrd  {} -> {}",
+        initrd.display(),
+        dst_i.display()
+    );
     fs::copy(initrd, &dst_i).with_context(|| format!("copy initrd to {}", dst_i.display()))?;
     Ok(())
 }
@@ -177,7 +185,12 @@ fn install_systemd_boot(mnt_esp: &Path, entries: &[BootEntry]) -> Result<()> {
     fs::create_dir_all(&entries_dir)?;
     for (idx, e) in entries.iter().enumerate() {
         match e {
-            BootEntry::Linux { title, kernel, initrd, options } => {
+            BootEntry::Linux {
+                title,
+                kernel,
+                initrd,
+                options,
+            } => {
                 let stem = entry_stem(title, idx);
                 let body = format!(
                     "title    {title}\n\
@@ -189,7 +202,11 @@ fn install_systemd_boot(mnt_esp: &Path, entries: &[BootEntry]) -> Result<()> {
                 fs::write(&path, body).with_context(|| format!("write {}", path.display()))?;
                 println!("Wrote loader entry: {}", path.display());
             }
-            BootEntry::EfiChainload { title, efi_path, esp_fs_uuid: _ } => {
+            BootEntry::EfiChainload {
+                title,
+                efi_path,
+                esp_fs_uuid: _,
+            } => {
                 // systemd-boot can only chainload an EFI app on the SAME ESP
                 // it was booted from. For the alongside-Windows case (shared
                 // ESP) this is fine. For the USB-live case, this branch is
@@ -236,7 +253,10 @@ fn install_grub_removable(mnt_esp: &Path, entries: &[BootEntry]) -> Result<()> {
     let tmp = std::env::temp_dir().join("nimblex-grub-embedded.cfg");
     fs::write(&tmp, embedded).context("write embedded grub cfg")?;
 
-    println!("Building standalone GRUB image at {} ...", efi_target.display());
+    println!(
+        "Building standalone GRUB image at {} ...",
+        efi_target.display()
+    );
     run_cmd_check(&[
         &grub_mkstandalone,
         "--format=x86_64-efi",
@@ -325,7 +345,12 @@ fn write_grub_cfg(mnt_esp: &Path, entries: &[BootEntry]) -> Result<()> {
 
     for e in entries {
         match e {
-            BootEntry::Linux { title, kernel, initrd, options } => {
+            BootEntry::Linux {
+                title,
+                kernel,
+                initrd,
+                options,
+            } => {
                 s.push_str(&format!("menuentry \"{}\" {{\n", grub_escape(title)));
                 s.push_str("    set root=$esp_root\n");
                 s.push_str(&format!("    linux  {}", kernel));
@@ -336,7 +361,11 @@ fn write_grub_cfg(mnt_esp: &Path, entries: &[BootEntry]) -> Result<()> {
                 s.push_str(&format!("    initrd {}\n", initrd));
                 s.push_str("}\n\n");
             }
-            BootEntry::EfiChainload { title, efi_path, esp_fs_uuid } => {
+            BootEntry::EfiChainload {
+                title,
+                efi_path,
+                esp_fs_uuid,
+            } => {
                 s.push_str(&format!("menuentry \"{}\" {{\n", grub_escape(title)));
                 s.push_str("    insmod chain\n");
                 s.push_str(&format!(
@@ -476,13 +505,22 @@ pub fn detect_windows_installs(mnt_esp: &Path) -> Vec<WindowsInstall> {
     for line in text.lines() {
         // lsblk -p prefixes name with /dev/, e.g. "/dev/sda1 vfat AB12-CD34"
         let mut it = line.split_whitespace();
-        let name = match it.next() { Some(s) => s.to_string(), None => continue };
+        let name = match it.next() {
+            Some(s) => s.to_string(),
+            None => continue,
+        };
         let fstype = it.next().unwrap_or("");
         let uuid = it.next().unwrap_or("").to_string();
-        if !matches!(fstype, "vfat" | "fat" | "msdos") { continue; }
-        if already_scanned.contains(&name) { continue; }
+        if !matches!(fstype, "vfat" | "fat" | "msdos") {
+            continue;
+        }
+        if already_scanned.contains(&name) {
+            continue;
+        }
         already_scanned.insert(name.clone());
-        if our_dev.as_deref() == Some(name.as_str()) { continue; }
+        if our_dev.as_deref() == Some(name.as_str()) {
+            continue;
+        }
 
         // Try to mount RO and probe for bootmgfw.efi.
         let probe_mnt = std::env::temp_dir().join(format!(
@@ -491,11 +529,15 @@ pub fn detect_windows_installs(mnt_esp: &Path) -> Vec<WindowsInstall> {
         ));
         let _ = fs::create_dir_all(&probe_mnt);
         let mounted = run_cmd_ok(&[
-            "mount", "-o", "ro,nofail",
+            "mount",
+            "-o",
+            "ro,nofail",
             &name,
             &probe_mnt.to_string_lossy(),
         ]);
-        if !mounted { continue; }
+        if !mounted {
+            continue;
+        }
 
         let bootmgfw = probe_mnt.join("EFI/Microsoft/Boot/bootmgfw.efi");
         let hit = bootmgfw.exists();
@@ -525,7 +567,9 @@ fn device_for_mountpoint(mp: &Path) -> Option<String> {
         let mut it = line.split_whitespace();
         let dev = it.next()?;
         let mount = it.next()?;
-        if mount == s { return Some(dev.to_string()); }
+        if mount == s {
+            return Some(dev.to_string());
+        }
     }
     None
 }
@@ -542,7 +586,9 @@ fn install_syslinux_mbr(disk: &Path) {
         "dd",
         "if=/usr/share/syslinux/mbr.bin",
         &format!("of={}", disk.display()),
-        "bs=440", "count=1", "conv=notrunc",
+        "bs=440",
+        "count=1",
+        "conv=notrunc",
     ]);
     if ok {
         println!("BIOS MBR written via syslinux.");
@@ -559,10 +605,14 @@ fn register_nvram_entry(esp_dev: &Path, loader_path: &str, label: &str) {
     let _ = run_cmd_ok(&[
         "efibootmgr",
         "--create",
-        "--disk", &disk,
-        "--part", &part.to_string(),
-        "--label", label,
-        "--loader", loader_path,
+        "--disk",
+        &disk,
+        "--part",
+        &part.to_string(),
+        "--label",
+        label,
+        "--loader",
+        loader_path,
     ]);
     println!("UEFI boot entry '{}' registered.", label);
 }
@@ -592,29 +642,43 @@ mod tests {
         assert_eq!(entry_stem("NimbleX", 0), "nimblex");
         assert_eq!(entry_stem("NimbleX (CLI)", 1), "nimblex-cli");
         assert_eq!(entry_stem("NimbleX (rescue)", 2), "nimblex-rescue");
-        assert_eq!(entry_stem("Windows Boot Manager", 2), "windows-boot-manager");
+        assert_eq!(
+            entry_stem("Windows Boot Manager", 2),
+            "windows-boot-manager"
+        );
     }
 
     #[test]
     fn compose_entries_includes_rescue_token() {
         let v = compose_entries(&[]);
-        let rescue_opts = v.iter().find_map(|e| match e {
-            BootEntry::Linux { title, options, .. } if title.contains("rescue") => {
-                Some(options.clone())
-            }
-            _ => None,
-        }).expect("rescue entry exists");
+        let rescue_opts = v
+            .iter()
+            .find_map(|e| match e {
+                BootEntry::Linux { title, options, .. } if title.contains("rescue") => {
+                    Some(options.clone())
+                }
+                _ => None,
+            })
+            .expect("rescue entry exists");
         assert!(rescue_opts.contains("rescue.target"));
     }
 
     #[test]
     fn compose_entries_includes_cli_token() {
         let v = compose_entries(&[]);
-        let cli_entry = v.iter().find_map(|e| match e {
-            BootEntry::Linux { title, options, .. } if title.contains("CLI") => Some(options.clone()),
-            _ => None,
-        }).expect("CLI entry exists");
-        assert!(cli_entry.contains("cli"), "CLI entry must carry the `cli` token");
+        let cli_entry = v
+            .iter()
+            .find_map(|e| match e {
+                BootEntry::Linux { title, options, .. } if title.contains("CLI") => {
+                    Some(options.clone())
+                }
+                _ => None,
+            })
+            .expect("CLI entry exists");
+        assert!(
+            cli_entry.contains("cli"),
+            "CLI entry must carry the `cli` token"
+        );
     }
 
     #[test]
@@ -625,7 +689,9 @@ mod tests {
             bootmgfw_path: "/EFI/Microsoft/Boot/bootmgfw.efi".into(),
         };
         let v = compose_entries(&[win]);
-        assert!(v.iter().any(|e| matches!(e, BootEntry::EfiChainload { .. })));
+        assert!(v
+            .iter()
+            .any(|e| matches!(e, BootEntry::EfiChainload { .. })));
     }
 
     #[test]
@@ -636,7 +702,13 @@ mod tests {
 
     #[test]
     fn split_dev_part_works() {
-        assert_eq!(split_dev_part(Path::new("/dev/sda1")), Some(("/dev/sda".into(), 1)));
-        assert_eq!(split_dev_part(Path::new("/dev/nvme0n1p3")), Some(("/dev/nvme0n1".into(), 3)));
+        assert_eq!(
+            split_dev_part(Path::new("/dev/sda1")),
+            Some(("/dev/sda".into(), 1))
+        );
+        assert_eq!(
+            split_dev_part(Path::new("/dev/nvme0n1p3")),
+            Some(("/dev/nvme0n1".into(), 3))
+        );
     }
 }

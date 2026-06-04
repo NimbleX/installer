@@ -3,7 +3,9 @@
 use crate::screens::{ScreenDestination, ScreenInstall};
 use crate::state::AppState;
 use gtk4::prelude::*;
-use gtk4::{gdk, glib, Application, ApplicationWindow, CssProvider, Settings, Stack, StackTransitionType};
+use gtk4::{
+    gdk, glib, Application, ApplicationWindow, CssProvider, Settings, Stack, StackTransitionType,
+};
 use installer_core::Bootloader;
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -36,24 +38,26 @@ pub fn on_activate(app: &Application, bootloader: Bootloader) {
     let install_rc = install.clone();
     stack.connect_visible_child_name_notify(move |s| {
         match s.visible_child_name().map(|n| n.to_string()).as_deref() {
-            Some(STACK_DEST) => dest_rc.refresh(),
+            Some(STACK_DEST) => dest_rc.refresh_async(),
             Some(STACK_INSTALL) => install_rc.start(),
             _ => {}
         }
     });
 
-    // Initial scan.
-    dest.refresh();
-
     let win = ApplicationWindow::builder()
         .application(app)
-        .title("Nimblex Installer")
-        .default_width(900)
+        .title("NimbleX Installer")
+        .default_width(960)
         .default_height(640)
         .child(&stack)
         .build();
     win.add_css_class("nimblex-window");
     win.present();
+
+    // Initial scan. Schedule it after presenting the window so the first frame
+    // is visible before slower NTFS/ext usage probes run.
+    let dest_initial = dest.clone();
+    glib::idle_add_local_once(move || dest_initial.refresh_async());
 
     let _ = state;
 }

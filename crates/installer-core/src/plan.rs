@@ -88,9 +88,9 @@ impl StepCategory {
             StepCategory::Probe => "Inspect the disk (read-only)",
             StepCategory::PrepareWindows => "Prepare Windows for safe resize",
             StepCategory::Resize => "Shrink the Windows partition",
-            StepCategory::Partition => "Create the Nimblex partition",
+            StepCategory::Partition => "Create the NimbleX partition",
             StepCategory::Format => "Format the new partition",
-            StepCategory::Copy => "Copy Nimblex onto the disk",
+            StepCategory::Copy => "Copy NimbleX onto the disk",
             StepCategory::Bootloader => "Install the bootloader",
             StepCategory::Finalise => "Finalise and clean up",
         }
@@ -105,15 +105,56 @@ impl Plan {
     pub fn summary_one_line(&self) -> String {
         match self.scenario {
             Scenario::UsbFullInstall => format!(
-                "Erase {} and install Nimblex ({}).",
+                "Erase {} and install NimbleX ({}).",
                 self.target_disk.display(),
                 self.new_root_size
             ),
             Scenario::AlongsideWindows => format!(
-                "Shrink Windows to {} and install Nimblex ({}).",
+                "Shrink Windows to {} and install NimbleX ({}).",
                 self.shrink_to.unwrap_or(Bytes(0)),
                 self.new_root_size
             ),
+            Scenario::FreeSpace => format!(
+                "Install NimbleX ({}) into existing free space. Windows and all \
+                 other partitions are left unchanged.",
+                self.new_root_size
+            ),
+            Scenario::ReuseExisting => {
+                // Distinguish in-place install from a reformat: the planner
+                // only emits an `mkfs.*` step when the user opts to format.
+                let will_format = self
+                    .steps
+                    .iter()
+                    .any(|s| s.argv.first().is_some_and(|a| a.starts_with("mkfs")));
+                // The live in-place path is marked by the `--inplace-live`
+                // flag on the copy step (target is the running partition).
+                let inplace_live = self
+                    .steps
+                    .iter()
+                    .any(|s| s.argv.iter().any(|a| a == "--inplace-live"));
+                if inplace_live {
+                    format!(
+                        "Reinstall NimbleX in place on the partition you're running \
+                         from ({}). The update is applied safely and takes effect \
+                         after you reboot. Windows and all other partitions are left \
+                         unchanged.",
+                        self.new_root_size
+                    )
+                } else if will_format {
+                    format!(
+                        "Reformat the existing NimbleX partition ({}) and reinstall. \
+                         Windows and all other partitions are left unchanged.",
+                        self.new_root_size
+                    )
+                } else {
+                    format!(
+                        "Install NimbleX onto the existing partition ({}) without \
+                         formatting it. Windows and all other partitions are left \
+                         unchanged.",
+                        self.new_root_size
+                    )
+                }
+            }
         }
     }
 
@@ -126,11 +167,14 @@ impl Plan {
         // ---- Header ----
         out.push_str("══════════════════════════════════════════════════════\n");
         out.push_str(&format!(
-            " Nimblex installer — {}\n",
+            " NimbleX installer — {}\n",
             scenario_label(&self.scenario)
         ));
         out.push_str("══════════════════════════════════════════════════════\n");
-        out.push_str(&format!("Target disk:        {}\n", self.target_disk.display()));
+        out.push_str(&format!(
+            "Target disk:        {}\n",
+            self.target_disk.display()
+        ));
         if let Some(p) = &self.shrink_partition {
             out.push_str(&format!(
                 "Shrink:             {}  →  {}\n",
@@ -140,7 +184,7 @@ impl Plan {
         }
         if let Some(p) = &self.new_root_partition {
             out.push_str(&format!(
-                "New Nimblex root:   {}  ({})\n",
+                "New NimbleX root:   {}  ({})\n",
                 p.display(),
                 self.new_root_size
             ));
@@ -185,6 +229,8 @@ fn scenario_label(s: &Scenario) -> &'static str {
     match s {
         Scenario::UsbFullInstall => "Install on USB stick (whole disk)",
         Scenario::AlongsideWindows => "Install alongside Windows",
+        Scenario::FreeSpace => "Install into free space (Windows untouched)",
+        Scenario::ReuseExisting => "Reuse existing NimbleX partition (Windows untouched)",
     }
 }
 

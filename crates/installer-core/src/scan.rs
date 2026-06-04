@@ -28,13 +28,10 @@ impl DiskScanner {
             .output()
             .context("failed to invoke lsblk")?;
         if !out.status.success() {
-            anyhow::bail!(
-                "lsblk failed: {}",
-                String::from_utf8_lossy(&out.stderr)
-            );
+            anyhow::bail!("lsblk failed: {}", String::from_utf8_lossy(&out.stderr));
         }
-        let parsed: LsblkRoot = serde_json::from_slice(&out.stdout)
-            .context("failed to parse lsblk JSON")?;
+        let parsed: LsblkRoot =
+            serde_json::from_slice(&out.stdout).context("failed to parse lsblk JSON")?;
         Ok(parsed
             .blockdevices
             .into_iter()
@@ -166,7 +163,12 @@ impl LsblkDev {
         Partition {
             path: PathBuf::from(&self.path),
             number,
-            start: Bytes(self.start.unwrap_or(0)),
+            // lsblk reports SIZE in bytes (we pass `-b`) but START is always
+            // in 512-byte sectors (it comes straight from the kernel's
+            // sysfs `start`, which `-b` does NOT convert). Multiply to get
+            // bytes — otherwise every partition offset, free-gap and
+            // mkpart-after placement is off by a factor of 512.
+            start: Bytes(self.start.unwrap_or(0).saturating_mul(512)),
             size: Bytes(self.size.unwrap_or(0)),
             label: self
                 .label
@@ -206,19 +208,29 @@ fn classify_role(dev: &LsblkDev) -> PartitionRole {
     {
         return PartitionRole::WindowsRecovery;
     }
-    if fs == "ntfs" {
+    if fs == "ntfs" || fs == "bitlocker" {
         // Disambiguated to System vs Data in promote_windows_system.
+        // BitLocker-encrypted volumes are detected by libblkid as fstype
+        // "BitLocker" (case-preserved by lsblk) — Windows 11 24H2+ enables
+        // device encryption by default on supported hardware, so the
+        // installer must recognise BitLocker partitions as Windows.
         return PartitionRole::WindowsData;
     }
     if fs == "swap" {
         return PartitionRole::LinuxSwap;
     }
-    if matches!(fs.as_str(), "ext2" | "ext3" | "ext4" | "btrfs" | "xfs" | "f2fs") {
+    if matches!(
+        fs.as_str(),
+        "ext2" | "ext3" | "ext4" | "btrfs" | "xfs" | "f2fs"
+    ) {
         return PartitionRole::Linux;
     }
     if pt == WIN_BASIC_DATA_GUID {
-        // GPT basic data partition without a recognised filesystem.
-        return PartitionRole::Other;
+        // GPT "Basic data partition" GUID. By definition this is a
+        // Microsoft-owned data partition (Windows / shared data). Treat
+        // it as Windows even when libblkid couldn't probe the filesystem
+        // (encrypted, dirty, or unsupported FS such as ReFS).
+        return PartitionRole::WindowsData;
     }
     PartitionRole::Other
 }
@@ -262,6 +274,76 @@ mod tests {
             children: vec![],
         };
         assert_eq!(classify_role(&d), PartitionRole::EfiSystem);
+    }
+
+    #[test]
+    fn classifies_bitlocker_as_windows_data() {
+        let d = LsblkDev {
+            path: "/dev/x".into(),
+            size: Some(500 * 1024 * 1024 * 1024),
+            dev_type: "part".into(),
+            fstype: Some("BitLocker".into()),
+            label: Some("X1 Windows".into()),
+            parttype: Some(WIN_BASIC_DATA_GUID.into()),
+            partlabel: Some("Basic data partition".into()),
+            rm: None,
+            tran: None,
+            model: None,
+            vendor: None,
+            pttype: None,
+            fsused: None,
+            start: None,
+            children: vec![],
+        };
+        assert_eq!(classify_role(&d), PartitionRole::WindowsData);
+    }
+
+    #[test]
+    fn classifies_unprobeable_basic_data_as_windows() {
+        // Encrypted / unrecognised FS but the GPT GUID is the Microsoft
+        // basic data partition — treat as Windows.
+        let d = LsblkDev {
+            path: "/dev/x".into(),
+            size: Some(500 * 1024 * 1024 * 1024),
+            dev_type: "part".into(),
+            fstype: None,
+            label: None,
+            parttype: Some(WIN_BASIC_DATA_GUID.into()),
+            partlabel: Some("Basic data partition".into()),
+            rm: None,
+            tran: None,
+            model: None,
+            vendor: None,
+            pttype: None,
+            fsused: None,
+            start: None,
+            children: vec![],
+        };
+        assert_eq!(classify_role(&d), PartitionRole::WindowsData);
+    }
+
+    #[test]
+    fn classifies_winre_before_basic_data_fallback() {
+        // WinRE has the WIN_RECOVERY_GUID, so it must be caught as
+        // recovery even though it sits in the GPT basic-data family.
+        let d = LsblkDev {
+            path: "/dev/x".into(),
+            size: Some(2 * 1024 * 1024 * 1024),
+            dev_type: "part".into(),
+            fstype: Some("ntfs".into()),
+            label: Some("WinRE_DRV".into()),
+            parttype: Some(WIN_RECOVERY_GUID.into()),
+            partlabel: Some("Basic data partition".into()),
+            rm: None,
+            tran: None,
+            model: None,
+            vendor: None,
+            pttype: None,
+            fsused: None,
+            start: None,
+            children: vec![],
+        };
+        assert_eq!(classify_role(&d), PartitionRole::WindowsRecovery);
     }
 
     #[test]

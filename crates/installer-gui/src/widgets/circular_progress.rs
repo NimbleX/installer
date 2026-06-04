@@ -7,7 +7,7 @@
 
 use gtk4::cairo::Context;
 use gtk4::prelude::*;
-use gtk4::{Align, Box as GtkBox, DrawingArea, Label, Image, Orientation};
+use gtk4::{Align, Box as GtkBox, DrawingArea, Image, Label, Orientation};
 use std::cell::Cell;
 use std::rc::Rc;
 
@@ -114,7 +114,7 @@ impl CircularProgress {
         self.caption_label.set_visible(false);
         self.area.queue_draw();
     }
-    
+
     pub fn reset(&self) {
         self.failed.set(false);
         self.progress.set(0.0);

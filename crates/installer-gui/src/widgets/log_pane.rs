@@ -2,8 +2,8 @@
 
 use gtk4::prelude::*;
 use gtk4::{
-    Box as GtkBox, Label, Orientation, PolicyType, ScrolledWindow, TextBuffer, TextView,
-    WrapMode, Align,
+    Align, Box as GtkBox, Label, Orientation, PolicyType, ScrolledWindow, TextBuffer, TextView,
+    WrapMode,
 };
 
 #[derive(Clone)]
@@ -40,7 +40,9 @@ impl LogPane {
         Self { root, buffer }
     }
 
-    pub fn widget(&self) -> &GtkBox { &self.root }
+    pub fn widget(&self) -> &GtkBox {
+        &self.root
+    }
 
     pub fn append_line(&self, line: &str) {
         let mut iter = self.buffer.end_iter();
@@ -51,7 +53,9 @@ impl LogPane {
         };
         self.buffer.insert(&mut iter, &text);
         // Auto-scroll to bottom.
-        let mark = self.buffer.create_mark(None, &self.buffer.end_iter(), false);
+        let mark = self
+            .buffer
+            .create_mark(None, &self.buffer.end_iter(), false);
         // Note: scrolling needs the TextView; we lost the handle, so leave
         // auto-scroll to TextView::set_cursor_visible(false) defaults.
         let _ = mark;
@@ -69,5 +73,7 @@ impl LogPane {
 }
 
 impl Default for LogPane {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }

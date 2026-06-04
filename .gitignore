@@ -16,6 +16,9 @@ Cargo.lock
 # Staging output of packaging/install.sh
 /stage
 
+# Screenshots pulled from the test machine by the test-nimblex-installer skill
+/.shots
+
 # Vim undo / patch-conflict leftovers
 .*.un~
 *.un~

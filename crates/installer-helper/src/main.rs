@@ -22,6 +22,7 @@ mod events;
 mod internal;
 mod run;
 mod runner;
+mod safety;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -92,7 +93,9 @@ fn read_plan_from_stdin() -> Result<Plan> {
 fn init_tracing() {
     use tracing_subscriber::EnvFilter;
     let _ = tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        )
         .with_writer(io::stderr)
         .try_init();
 }

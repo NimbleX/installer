@@ -112,7 +112,9 @@ fn check_sgdisk(rest: &[&str]) -> Result<()> {
 /// Validate an sgdisk `N:value` token.  N must be an integer 1–128.
 /// The value part must be free of shell metacharacters.
 fn validate_sgdisk_nv(flag: &str, nv: &str) -> Result<()> {
-    let colon = nv.find(':').ok_or_else(|| anyhow!("{} value must be N:value", flag))?;
+    let colon = nv
+        .find(':')
+        .ok_or_else(|| anyhow!("{} value must be N:value", flag))?;
     let n_str = &nv[..colon];
     let val = &nv[colon + 1..];
     n_str
@@ -160,7 +162,9 @@ fn check_parted(rest: &[&str]) -> Result<()> {
     // Operation must be one of mklabel/mkpart/set/resizepart.
     let ops_seen: Vec<&&str> = rest
         .iter()
-        .filter(|a| matches!(***a, _) && matches!(a.as_ref(), "mklabel" | "mkpart" | "set" | "resizepart"))
+        .filter(|a| {
+            matches!(***a, _) && matches!(a.as_ref(), "mklabel" | "mkpart" | "set" | "resizepart")
+        })
         .collect();
     if ops_seen.is_empty() {
         bail!("parted: no recognised operation among args");
@@ -184,7 +188,8 @@ fn check_mkfs_fat(rest: &[&str]) -> Result<()> {
             "-F32" | "-F" | "-n" | "-I" => {
                 // -n / -F take a value; -F32 is a single token; advance if needed.
                 if matches!(*a, "-n" | "-F") {
-                    iter.next().ok_or_else(|| anyhow!("missing value for {}", a))?;
+                    iter.next()
+                        .ok_or_else(|| anyhow!("missing value for {}", a))?;
                 }
             }
             other if other.starts_with('-') => bail!("unexpected mkfs.fat flag: {}", other),
@@ -207,7 +212,8 @@ fn check_mkfs_ext4(rest: &[&str]) -> Result<()> {
         match *a {
             "-F" | "-q" => {}
             "-L" | "-U" | "-T" | "-m" | "-N" => {
-                iter.next().ok_or_else(|| anyhow!("missing value for {}", a))?;
+                iter.next()
+                    .ok_or_else(|| anyhow!("missing value for {}", a))?;
             }
             "-O" => {
                 // Only allow the explicit 64bit feature flag.
@@ -270,6 +276,7 @@ fn check_internal(rest: &[&str]) -> Result<()> {
         | "check-fast-startup"
         | "mkpart-after"
         | "resizepart"
+        | "unmount-target"
         | "settle-partitions" => Ok(()),
         other => bail!("unknown internal subcommand: {}", other),
     }
@@ -304,7 +311,16 @@ mod tests {
 
     #[test]
     fn allows_mkfs_ext4_with_64bit() {
-        validate_argv(&s(&["mkfs.ext4", "-F", "-O", "64bit", "-L", "NIMBLEX_ROOT", "/dev/sdb2"])).unwrap();
+        validate_argv(&s(&[
+            "mkfs.ext4",
+            "-F",
+            "-O",
+            "64bit",
+            "-L",
+            "NIMBLEX_ROOT",
+            "/dev/sdb2",
+        ]))
+        .unwrap();
     }
 
     #[test]
@@ -326,8 +342,7 @@ mod tests {
 
     #[test]
     fn rejects_path_traversal() {
-        let err =
-            validate_argv(&s(&["mkfs.ext4", "-F", "/dev/../tmp/evil"])).unwrap_err();
+        let err = validate_argv(&s(&["mkfs.ext4", "-F", "/dev/../tmp/evil"])).unwrap_err();
         assert!(err.to_string().contains("suspicious"));
     }
 
@@ -392,13 +407,7 @@ mod tests {
 
     #[test]
     fn rejects_ntfsresize_non_numeric_size() {
-        let err = validate_argv(&s(&[
-            "ntfsresize",
-            "--size",
-            "100GB",
-            "/dev/sda3",
-        ]))
-        .unwrap_err();
+        let err = validate_argv(&s(&["ntfsresize", "--size", "100GB", "/dev/sda3"])).unwrap_err();
         assert!(err.to_string().contains("bytes integer"));
     }
 }

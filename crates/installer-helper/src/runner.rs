@@ -39,6 +39,10 @@ pub fn dry_run(plan: &Plan) -> Result<()> {
 /// JSON events. Aborts at the first failing step.
 pub fn execute(plan: &Plan) -> Result<()> {
     allowlist::validate_steps(&plan.steps)?;
+    // Root-side backstop: independently refuse to format or truncate the
+    // device the running live session booted from, regardless of what the
+    // (unprivileged) GUI sent us.
+    crate::safety::guard_steps(&plan.steps)?;
     Event::PlanAccepted {
         steps: plan.steps.len(),
     }
@@ -94,8 +98,7 @@ fn run_step(index: usize, argv: &[String]) -> Result<i32> {
     // alias so the helper's argv0 dispatch still triggers internal mode.
     const INTERNAL_ALIAS: &str = "nimblex-installer-helper-internal";
     let mut cmd = if argv[0] == INTERNAL_ALIAS {
-        let exe = std::env::current_exe()
-            .unwrap_or_else(|_| std::path::PathBuf::from(&argv[0]));
+        let exe = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from(&argv[0]));
         let mut c = Command::new(exe);
         #[cfg(unix)]
         {
@@ -119,22 +122,14 @@ fn run_step(index: usize, argv: &[String]) -> Result<i32> {
     let stdout_thread = stdout.map(|s| {
         std::thread::spawn(move || {
             for line in BufReader::new(s).lines().map_while(Result::ok) {
-                Event::Stdout {
-                    index,
-                    line,
-                }
-                .emit();
+                Event::Stdout { index, line }.emit();
             }
         })
     });
     let stderr_thread = stderr.map(|s| {
         std::thread::spawn(move || {
             for line in BufReader::new(s).lines().map_while(Result::ok) {
-                Event::Stderr {
-                    index,
-                    line,
-                }
-                .emit();
+                Event::Stderr { index, line }.emit();
             }
         })
     });

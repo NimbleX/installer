@@ -107,8 +107,7 @@ pub fn probe_used(dev: &Path) -> Option<Bytes> {
             //     0x38 initialized_size u64
             let mp_off =
                 u16::from_le_bytes(record[off + 0x20..off + 0x22].try_into().ok()?) as usize;
-            alloc_size =
-                u64::from_le_bytes(record[off + 0x28..off + 0x30].try_into().ok()?);
+            alloc_size = u64::from_le_bytes(record[off + 0x28..off + 0x30].try_into().ok()?);
             let rl_start = off + mp_off;
             let rl_end = off + attr_len;
             if rl_start >= rl_end {

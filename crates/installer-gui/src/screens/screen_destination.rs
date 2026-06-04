@@ -6,29 +6,46 @@
 use crate::app::STACK_INSTALL;
 use crate::state::AppState;
 use crate::widgets::{
-    app_card, disk_card, partition_preview::PlannedSegment,
-    partition_preview::SegmentAction, Header, HeaderStep, PartitionPreview,
+    app_card, disk_card, partition_preview::PlannedSegment, partition_preview::SegmentAction,
+    Header, HeaderStep, PartitionPreview,
 };
 use gtk4::prelude::*;
 use gtk4::{
-    glib, Align, Box as GtkBox, Button, CheckButton, FlowBox, Label, Orientation,
-    PolicyType, Revealer, RevealerTransitionType, ScrolledWindow, SelectionMode, Stack,
-    TextBuffer, TextView, ToggleButton, WrapMode, Window,
+    glib, Align, Box as GtkBox, Button, CheckButton, FlowBox, Label, Orientation, PolicyType,
+    Revealer, RevealerTransitionType, ScrolledWindow, SelectionMode, Stack, TextBuffer, TextView,
+    ToggleButton, Window, WrapMode,
 };
 use installer_core::{
     resize::{
-        min_reclaim, min_windows_residual_after_shrink,
-        WINDOWS_MIN_FREE_BEFORE_SHRINK,
+        min_install, min_reclaim, min_windows_residual_after_shrink, WINDOWS_MIN_FREE_BEFORE_SHRINK,
     },
     Bytes, Disk, DiskScanner, InstallMode, InstallPlanner, PartitionRole,
 };
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+use std::sync::mpsc;
+use std::time::Duration;
 
 /// 512 MiB ESP — matches `InstallPlanner::plan_usb`.
 const ESP_SIZE_BYTES: u64 = 512 * 1024 * 1024;
 /// 1 MiB alignment gap at the start of the disk for fresh GPT installs.
 const GPT_ALIGN_BYTES: u64 = 1024 * 1024;
+
+/// Shown when the user selects the disk they booted from for a destructive
+/// whole-disk operation (erase / alongside / free-space) and we are NOT
+/// running from RAM. Such a disk cannot be repartitioned or formatted while
+/// it is feeding the live session.
+const LIVE_DISK_BLOCK_MSG: &str =
+    "You started NimbleX from this drive, so it can't be erased or repartitioned \
+     while it's running. Reboot and choose the 'Copy to RAM' option, or run the \
+     installer from a separate USB stick.";
+
+/// Shown when reinstalling in place onto the partition the session booted
+/// from. This is allowed via the crash-safe copy path; formatting is disabled.
+const LIVE_INPLACE_INFO_MSG: &str =
+    "You're reinstalling onto the partition you're running from. NimbleX will be \
+     updated in place safely; the changes take effect after you reboot. Formatting \
+     isn't available here because it would erase the running system.";
 
 #[derive(Clone)]
 pub struct ScreenDestination {
@@ -42,6 +59,7 @@ pub struct ScreenDestination {
 
     mode_pill: Label,
     preview: PartitionPreview,
+    format_existing_check: CheckButton,
     warning: Label,
     continue_btn: Button,
 
@@ -67,7 +85,7 @@ impl ScreenDestination {
         let body = GtkBox::new(Orientation::Vertical, 14);
         body.add_css_class("screen-body");
 
-        let h1 = Label::new(Some("Where should we install Nimblex?"));
+        let h1 = Label::new(Some("Where should we install NimbleX?"));
         h1.add_css_class("screen-h1");
         h1.set_halign(Align::Start);
         body.append(&h1);
@@ -121,6 +139,18 @@ impl ScreenDestination {
         preview_panel.append(preview.widget());
         body.append(&preview_panel);
 
+        // ---- Format-existing checkbox (ReuseNimblex mode only) ----
+        // When a compatible Nimblex partition already exists, the default is
+        // to install onto it in place. Ticking this reformats it first,
+        // wiping any existing data. Hidden for every other mode.
+        let format_existing_check = CheckButton::with_label(
+            "Format the partition first (erases everything currently on it)",
+        );
+        format_existing_check.add_css_class("understand");
+        format_existing_check.set_visible(false);
+        format_existing_check.set_active(false);
+        body.append(&format_existing_check);
+
         let warning = Label::new(Some(""));
         warning.add_css_class("warning-bar");
         warning.set_halign(Align::Start);
@@ -165,8 +195,7 @@ impl ScreenDestination {
         overlay_summary.set_wrap(true);
         overlay_sheet.append(&overlay_summary);
 
-        let overlay_check =
-            CheckButton::with_label("I understand my disk will be modified.");
+        let overlay_check = CheckButton::with_label("I understand my disk will be modified.");
         overlay_check.add_css_class("understand");
         overlay_sheet.append(&overlay_check);
 
@@ -198,6 +227,7 @@ impl ScreenDestination {
             disk_cards: Rc::new(RefCell::new(Vec::new())),
             mode_pill: mode_pill.clone(),
             preview: preview.clone(),
+            format_existing_check: format_existing_check.clone(),
             warning: warning.clone(),
             continue_btn: continue_btn.clone(),
             revealer: revealer.clone(),
@@ -220,7 +250,7 @@ impl ScreenDestination {
             // [ ... kept ... ] [ Windows (shrunk) ] [ Nimblex (reclaimed) ] [ ... kept ... ]
             // The boundary is between Windows and Nimblex.
             // So `byte_offset` = start of Nimblex.
-            
+
             // We can calculate `requested_reclaim_bytes` = `win.size.0 - (byte_offset - win.start.0)`.
             // Let's do that.
             let snapshot = {
@@ -237,13 +267,13 @@ impl ScreenDestination {
                 Some(p) => p,
                 None => return,
             };
-            
+
             // Calculate kept bytes
             let kept_bytes = byte_offset.saturating_sub(win.start.0);
-            
+
             // Reclaim is the rest of the Windows partition
             let reclaim = win.size.0.saturating_sub(kept_bytes);
-            
+
             let min = min_reclaim();
             let win_kept_floor = min_windows_residual_after_shrink(win.used.unwrap_or(Bytes(0)));
             let max = if win_kept_floor >= win.size {
@@ -251,9 +281,9 @@ impl ScreenDestination {
             } else {
                 (win.size - win_kept_floor).max(min)
             };
-            
+
             let clamped_reclaim = reclaim.clamp(min.0, max.0);
-            
+
             if let Ok(mut st) = me_slider.state.try_borrow_mut() {
                 st.requested_reclaim_bytes = Some(clamped_reclaim);
             } else {
@@ -266,6 +296,18 @@ impl ScreenDestination {
         let me_show = me.clone();
         header.show_commands_btn().connect_clicked(move |_| {
             me_show.show_commands_dialog();
+        });
+
+        // Format-existing checkbox → record choice and re-confirm consent.
+        let me_fmt = me.clone();
+        format_existing_check.connect_toggled(move |c| {
+            if let Ok(mut st) = me_fmt.state.try_borrow_mut() {
+                st.reuse_format = c.is_active();
+            }
+            // Changing the format choice changes how destructive the install
+            // is, so any prior "I understand" consent must be re-collected.
+            me_fmt.overlay_check.set_active(false);
+            me_fmt.revealer.set_reveal_child(false);
         });
 
         // Continue → reveal overlay (and light up Confirm step)
@@ -315,9 +357,36 @@ impl ScreenDestination {
         &self.root
     }
 
-    /// Re-scan disks and rebuild the cards. Called when the screen becomes
-    /// visible.
-    pub fn refresh(&self) {
+    /// Show a lightweight loading state and perform the expensive disk scan
+    /// off the GTK thread. This lets the window present immediately instead
+    /// of blocking on NTFS/ext usage probes before the first frame is drawn.
+    pub fn refresh_async(&self) {
+        self.show_scanning_state();
+
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let result = DiskScanner::scan_with_usage();
+            let _ = tx.send(result);
+        });
+
+        let me = self.clone();
+        let rx = Rc::new(RefCell::new(rx));
+        glib::timeout_add_local(Duration::from_millis(40), move || {
+            match rx.borrow().try_recv() {
+                Ok(result) => {
+                    me.finish_refresh(result);
+                    glib::ControlFlow::Break
+                }
+                Err(mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    me.finish_refresh(Err(anyhow::anyhow!("disk scan worker stopped")));
+                    glib::ControlFlow::Break
+                }
+            }
+        });
+    }
+
+    fn show_scanning_state(&self) {
         // Reset stepper.
         self.header.set_active(HeaderStep::Destination);
 
@@ -327,10 +396,46 @@ impl ScreenDestination {
         }
         self.disk_cards.borrow_mut().clear();
 
-        let disks = match DiskScanner::scan_with_usage() {
+        {
+            let mut s = self.state.borrow_mut();
+            s.disks.clear();
+            s.selected_disk = None;
+            s.requested_reclaim_bytes = None;
+            s.install_mode = None;
+            s.reuse_format = false;
+            s.reuse_inplace_live = false;
+            s.plan = None;
+        }
+
+        self.preview.set_disk(None);
+        self.format_existing_check.set_active(false);
+        self.format_existing_check.set_visible(false);
+        self.warning.set_text("Scanning disks…");
+        self.warning.set_visible(true);
+        self.continue_btn.set_sensitive(false);
+        self.header.show_commands_btn().set_sensitive(false);
+        self.overlay_check.set_active(false);
+        self.revealer.set_reveal_child(false);
+
+        let msg = Label::new(Some("Scanning disks…"));
+        msg.add_css_class("dim");
+        msg.set_halign(Align::Start);
+        self.cards_box.append(&msg);
+    }
+
+    fn finish_refresh(&self, result: anyhow::Result<Vec<Disk>>) {
+        while let Some(child) = self.cards_box.first_child() {
+            self.cards_box.remove(&child);
+        }
+        self.disk_cards.borrow_mut().clear();
+        self.warning.set_visible(false);
+
+        let disks = match result {
             Ok(d) => d,
             Err(e) => {
-                let msg = Label::new(Some(&format!("Could not scan disks: {}", e)));
+                let text = format!("Could not scan disks: {}", e);
+                self.warn(&text);
+                let msg = Label::new(Some(&text));
                 msg.add_css_class("warning-bar");
                 msg.set_wrap(true);
                 self.cards_box.append(&msg);
@@ -339,7 +444,9 @@ impl ScreenDestination {
         };
 
         if disks.is_empty() {
-            let msg = Label::new(Some("No installable drives found. Plug in a target drive and reopen."));
+            let msg = Label::new(Some(
+                "No installable drives found. Plug in a target drive and reopen.",
+            ));
             msg.add_css_class("dim");
             msg.set_halign(Align::Start);
             self.cards_box.append(&msg);
@@ -352,7 +459,13 @@ impl ScreenDestination {
             s.selected_disk = None;
             s.requested_reclaim_bytes = None;
             s.install_mode = None;
+            s.reuse_format = false;
+            // Detect the live boot medium once per scan. Stable for the
+            // session; the gating in `refresh_layout` reads it per selection.
+            s.live_media = installer_core::LiveMedia::detect();
         }
+        self.format_existing_check.set_active(false);
+        self.format_existing_check.set_visible(false);
 
         // Build a card per disk; group them so they act as radio.
         let mut group_anchor: Option<ToggleButton> = None;
@@ -423,10 +536,29 @@ impl ScreenDestination {
         };
 
         // Decide mode automatically. Only one mode is offered per disk:
+        //  - An existing NIMBLEX partition (left by a prior install, or the
+        //    medium we booted from) → install onto it in place by default,
+        //    with formatting offered as an opt-in checkbox. Highest priority
+        //    so an existing Nimblex install is reused rather than wiped — on
+        //    internal disks *and* removable media (e.g. refreshing a USB
+        //    install, or reinstalling onto the live stick).
+        //  - Has Windows + not removable + Windows is BitLocker-encrypted
+        //    + enough free space → install into the free gap.
         //  - Has Windows + not removable → install alongside Windows.
         //  - Removable, or no Windows → wipe and install Nimblex.
-        let mode = if disk.has_windows() && !disk.removable {
-            InstallMode::AlongsideWindows
+        let mode = if disk.existing_nimblex_partition().is_some() {
+            InstallMode::ReuseNimblex
+        } else if disk.has_windows() && !disk.removable {
+            let win_is_bitlocker = disk
+                .primary_windows_partition()
+                .map(|p| p.fs.eq_ignore_ascii_case("bitlocker"))
+                .unwrap_or(false);
+            let largest_gap = disk.largest_free_gap().map(|g| g.size).unwrap_or(0);
+            if win_is_bitlocker && Bytes(largest_gap) >= min_install() {
+                InstallMode::FreeSpace
+            } else {
+                InstallMode::AlongsideWindows
+            }
         } else {
             InstallMode::EraseWholeDisk
         };
@@ -434,10 +566,37 @@ impl ScreenDestination {
 
         self.preview.set_disk(Some(disk.clone()));
 
+        // ── Live-device safety gating ────────────────────────────────────
+        // The device the running session booted from cannot be reformatted or
+        // repartitioned while it is feeding the live overlay (unless we are
+        // running from RAM, in which case nothing is at risk). Reinstalling
+        // *in place* onto the live partition IS allowed via the crash-safe
+        // copy path and is handled inside the ReuseNimblex branch below.
+        let live = self.state.borrow().live_media.clone();
+        self.state.borrow_mut().reuse_inplace_live = false;
+        if live.disk_is_unsafe_to_modify(&disk.path) && !matches!(mode, InstallMode::ReuseNimblex) {
+            self.format_existing_check.set_visible(false);
+            self.state.borrow_mut().reuse_format = false;
+            self.preview
+                .set_planned(build_keep_segments(&disk), disk.size.0);
+            self.warn(LIVE_DISK_BLOCK_MSG);
+            self.continue_btn.set_sensitive(false);
+            self.header.show_commands_btn().set_sensitive(false);
+            return;
+        }
+
+        // The "Format the partition first" checkbox only applies to the
+        // reuse-existing mode; hide it (and clear its choice) everywhere else.
+        // The ReuseNimblex branch below re-shows it.
+        if !matches!(mode, InstallMode::ReuseNimblex) {
+            self.format_existing_check.set_visible(false);
+            self.state.borrow_mut().reuse_format = false;
+        }
+
         match mode {
             InstallMode::EraseWholeDisk => {
                 self.mode_pill.set_markup(&format!(
-                    "<b>Wipe and install</b>  ·  {} will be erased and Nimblex installed onto it.",
+                    "<b>Wipe and install</b>  ·  {} will be erased and NimbleX installed onto it.",
                     disk.path.display()
                 ));
                 self.mode_pill.remove_css_class("mode-pill-alongside");
@@ -455,7 +614,7 @@ impl ScreenDestination {
             }
             InstallMode::AlongsideWindows => {
                 self.mode_pill.set_markup(&format!(
-                    "<b>Install alongside Windows</b>  ·  Windows is preserved; Nimblex takes the freed space."
+                    "<b>Install alongside Windows</b>  ·  Windows is preserved; NimbleX takes the freed space."
                 ));
                 self.mode_pill.remove_css_class("mode-pill-erase");
                 self.mode_pill.add_css_class("mode-pill-alongside");
@@ -463,20 +622,35 @@ impl ScreenDestination {
                 let win = match disk.primary_windows_partition().cloned() {
                     Some(p) => p,
                     None => {
-                        self.preview.clear_planned();
+                        self.preview
+                            .set_planned(build_keep_segments(&disk), disk.size.0);
                         self.warn("This disk does not have a Windows partition.");
                         self.continue_btn.set_sensitive(false);
                         self.header.show_commands_btn().set_sensitive(false);
                         return;
                     }
                 };
+                if win.fs.eq_ignore_ascii_case("bitlocker") {
+                    self.warn(
+                        "Windows on this disk is BitLocker-encrypted. \
+                         Boot into Windows, open Settings → Privacy & security → \
+                         Device encryption (or Manage BitLocker) and turn it OFF \
+                         to decrypt the drive, then reopen the installer.",
+                    );
+                    self.preview
+                        .set_planned(build_keep_segments(&disk), disk.size.0);
+                    self.continue_btn.set_sensitive(false);
+                    self.header.show_commands_btn().set_sensitive(false);
+                    return;
+                }
                 let used = match win.used {
                     Some(u) => u,
                     None => {
                         self.warn(
                             "Could not read Windows usage. Reopen the installer with Windows fully shut down (no Fast Startup).",
                         );
-                        self.preview.clear_planned();
+                        self.preview
+                            .set_planned(build_keep_segments(&disk), disk.size.0);
                         self.continue_btn.set_sensitive(false);
                         self.header.show_commands_btn().set_sensitive(false);
                         return;
@@ -488,10 +662,11 @@ impl ScreenDestination {
                         "Windows has only {} free. Free at least {} inside Windows (Recycle Bin, Downloads, %TEMP%, hibernation file) and reopen.",
                         free, WINDOWS_MIN_FREE_BEFORE_SHRINK
                     ));
-                    self.preview.clear_planned();
+                    self.preview
+                        .set_planned(build_keep_segments(&disk), disk.size.0);
                     self.continue_btn.set_sensitive(false);
                     self.header.show_commands_btn().set_sensitive(false);
-                        return;
+                    return;
                 }
                 self.warning.set_visible(false);
 
@@ -509,6 +684,88 @@ impl ScreenDestination {
                 self.continue_btn.set_sensitive(true);
                 self.header.show_commands_btn().set_sensitive(true);
                 self.refresh_slider_labels();
+            }
+            InstallMode::FreeSpace => {
+                self.mode_pill.set_markup(
+                    "<b>Install in free space</b>  ·  Windows is BitLocker-encrypted; \
+                     NimbleX will be added to the existing unallocated space without \
+                     touching Windows.",
+                );
+                self.mode_pill.remove_css_class("mode-pill-erase");
+                self.mode_pill.add_css_class("mode-pill-alongside");
+                self.warning.set_visible(false);
+
+                let gap = match disk.largest_free_gap() {
+                    Some(g) => g,
+                    None => {
+                        self.warn("No unallocated space found on this disk.");
+                        self.preview
+                            .set_planned(build_keep_segments(&disk), disk.size.0);
+                        self.continue_btn.set_sensitive(false);
+                        self.header.show_commands_btn().set_sensitive(false);
+                        return;
+                    }
+                };
+                let segs = build_freespace_segments(&disk, gap.start, gap.size);
+                self.preview.set_planned(segs, disk.size.0);
+
+                // Plan_for ignores reclaim_bytes for FreeSpace mode.
+                self.state.borrow_mut().requested_reclaim_bytes = Some(gap.size);
+
+                self.continue_btn.set_sensitive(true);
+                self.header.show_commands_btn().set_sensitive(true);
+            }
+            InstallMode::ReuseNimblex => {
+                self.mode_pill.set_markup(
+                    "<b>Reuse existing NimbleX partition</b>  ·  A previous NimbleX \
+                     partition was found; NimbleX will be installed onto it. \
+                     Windows and all other partitions are left untouched.",
+                );
+                self.mode_pill.remove_css_class("mode-pill-erase");
+                self.mode_pill.add_css_class("mode-pill-alongside");
+                self.warning.set_visible(false);
+
+                let part = match disk.existing_nimblex_partition().cloned() {
+                    Some(p) => p,
+                    None => {
+                        self.warn("No existing NimbleX partition found on this disk.");
+                        self.preview
+                            .set_planned(build_keep_segments(&disk), disk.size.0);
+                        self.continue_btn.set_sensitive(false);
+                        self.header.show_commands_btn().set_sensitive(false);
+                        return;
+                    }
+                };
+                let segs = build_reuse_segments(&disk, &part);
+                self.preview.set_planned(segs, disk.size.0);
+                self.state.borrow_mut().requested_reclaim_bytes = None;
+
+                // Is this the very partition we booted from (and not running
+                // from RAM)? If so, the install must use the crash-safe
+                // in-place strategy and formatting is impossible.
+                let inplace_live = live.partition_needs_inplace_live(&part.path);
+                self.state.borrow_mut().reuse_inplace_live = inplace_live;
+
+                if inplace_live {
+                    // Reinstalling onto the running partition: allowed, but
+                    // formatting it would wipe the system we're executing
+                    // from, so the format option is disabled here.
+                    self.format_existing_check.set_active(false);
+                    self.format_existing_check.set_sensitive(false);
+                    self.format_existing_check.set_visible(true);
+                    self.state.borrow_mut().reuse_format = false;
+                    self.warn(LIVE_INPLACE_INFO_MSG);
+                } else {
+                    // Default: install in place (no format). Offer the
+                    // optional reformat as a checkbox, preserving the user's
+                    // prior choice.
+                    self.format_existing_check.set_sensitive(true);
+                    self.format_existing_check.set_visible(true);
+                    self.state.borrow_mut().reuse_format = self.format_existing_check.is_active();
+                }
+
+                self.continue_btn.set_sensitive(true);
+                self.header.show_commands_btn().set_sensitive(true);
             }
         }
     }
@@ -553,8 +810,17 @@ impl ScreenDestination {
         };
         let reclaim = s.requested_reclaim_bytes;
         let bootloader = s.bootloader;
+        let reuse_format = s.reuse_format;
+        let reuse_inplace_live = s.reuse_inplace_live;
         drop(s);
-        match InstallPlanner::plan_for(&disk, mode, reclaim, bootloader) {
+        match InstallPlanner::plan_for(
+            &disk,
+            mode,
+            reclaim,
+            bootloader,
+            reuse_format,
+            reuse_inplace_live,
+        ) {
             Ok(plan) => {
                 self.state.borrow_mut().plan = Some(plan);
                 true
@@ -580,8 +846,18 @@ impl ScreenDestination {
             let mode = s.install_mode;
             let reclaim = s.requested_reclaim_bytes;
             let bootloader = s.bootloader;
+            let reuse_format = s.reuse_format;
+            let reuse_inplace_live = s.reuse_inplace_live;
             match (disk, mode) {
-                (Some(d), Some(m)) => InstallPlanner::plan_for(&d, m, reclaim, bootloader).ok(),
+                (Some(d), Some(m)) => InstallPlanner::plan_for(
+                    &d,
+                    m,
+                    reclaim,
+                    bootloader,
+                    reuse_format,
+                    reuse_inplace_live,
+                )
+                .ok(),
                 _ => None,
             }
         };
@@ -669,9 +945,41 @@ fn build_erase_segments(disk: &Disk) -> Vec<PlannedSegment> {
         start: root_start,
         size: root_size,
         role: PartitionRole::Linux,
-        label: "Nimblex".into(),
+        label: "NimbleX".into(),
         action: SegmentAction::NewNimblex,
     });
+    segs
+}
+
+/// Build `Vec<PlannedSegment>` for the "After" strip in **FreeSpace** mode.
+/// Every existing partition is KEPT unchanged; a single new Nimblex
+/// partition is placed into the chosen unallocated gap (`gap_start` /
+/// `gap_size`). The gap may sit *between* existing partitions, so the
+/// Nimblex segment is positioned at `gap_start`, not merely appended.
+fn build_freespace_segments(disk: &Disk, gap_start: u64, gap_size: u64) -> Vec<PlannedSegment> {
+    let mut segs = Vec::new();
+    for p in &disk.partitions {
+        segs.push(PlannedSegment {
+            start: p.start.0,
+            size: p.size.0,
+            role: p.role,
+            label: if p.label.is_empty() {
+                p.role.short_label().to_string()
+            } else {
+                p.label.clone()
+            },
+            action: SegmentAction::Keep,
+        });
+    }
+    segs.push(PlannedSegment {
+        start: gap_start,
+        size: gap_size,
+        role: PartitionRole::Linux,
+        label: "NimbleX".into(),
+        action: SegmentAction::NewNimblex,
+    });
+    // Render in physical disk order so the strip lays out left-to-right.
+    segs.sort_by_key(|s| s.start);
     segs
 }
 
@@ -713,7 +1021,7 @@ fn build_alongside_segments(
                 start: p.start.0 + win_kept_bytes,
                 size: nimblex_bytes,
                 role: PartitionRole::Linux,
-                label: "Nimblex".into(),
+                label: "NimbleX".into(),
                 action: SegmentAction::NewNimblex,
             });
         } else {
@@ -730,5 +1038,65 @@ fn build_alongside_segments(
             });
         }
     }
+    segs
+}
+
+/// Build `Vec<PlannedSegment>` that simply renders every existing partition
+/// as KEPT, in physical disk order. Used in blocked states (e.g. BitLocker
+/// with no free space) so the layout strip still shows the disk's real
+/// partitions instead of an empty box.
+fn build_keep_segments(disk: &Disk) -> Vec<PlannedSegment> {
+    let mut segs: Vec<PlannedSegment> = disk
+        .partitions
+        .iter()
+        .map(|p| PlannedSegment {
+            start: p.start.0,
+            size: p.size.0,
+            role: p.role,
+            label: if p.label.is_empty() {
+                p.role.short_label().to_string()
+            } else {
+                p.label.clone()
+            },
+            action: SegmentAction::Keep,
+        })
+        .collect();
+    segs.sort_by_key(|s| s.start);
+    segs
+}
+
+/// Build `Vec<PlannedSegment>` for **ReuseNimblex** mode. Every partition is
+/// KEPT except the existing Nimblex partition, which is shown as NEW (it will
+/// be reformatted in place).
+fn build_reuse_segments(disk: &Disk, nimblex: &installer_core::Partition) -> Vec<PlannedSegment> {
+    let mut segs: Vec<PlannedSegment> = disk
+        .partitions
+        .iter()
+        .map(|p| {
+            let is_nimblex = p.number == nimblex.number;
+            PlannedSegment {
+                start: p.start.0,
+                size: p.size.0,
+                role: if is_nimblex {
+                    PartitionRole::Linux
+                } else {
+                    p.role
+                },
+                label: if is_nimblex {
+                    "NimbleX".into()
+                } else if p.label.is_empty() {
+                    p.role.short_label().to_string()
+                } else {
+                    p.label.clone()
+                },
+                action: if is_nimblex {
+                    SegmentAction::NewNimblex
+                } else {
+                    SegmentAction::Keep
+                },
+            }
+        })
+        .collect();
+    segs.sort_by_key(|s| s.start);
     segs
 }

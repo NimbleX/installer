@@ -107,10 +107,7 @@ mod tests {
             Bootloader::Auto.resolve(Firmware::Uefi),
             Bootloader::SystemdBoot
         );
-        assert_eq!(
-            Bootloader::Auto.resolve(Firmware::Bios),
-            Bootloader::Grub
-        );
+        assert_eq!(Bootloader::Auto.resolve(Firmware::Bios), Bootloader::Grub);
     }
 
     #[test]
@@ -119,10 +116,7 @@ mod tests {
             Bootloader::SystemdBoot.resolve(Firmware::Bios),
             Bootloader::SystemdBoot
         );
-        assert_eq!(
-            Bootloader::Grub.resolve(Firmware::Uefi),
-            Bootloader::Grub
-        );
+        assert_eq!(Bootloader::Grub.resolve(Firmware::Uefi), Bootloader::Grub);
     }
 
     #[test]

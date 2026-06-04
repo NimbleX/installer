@@ -47,11 +47,9 @@ fn probe_ntfs(dev: &Path) -> Option<Bytes> {
     // First try the friendly tool — it gives us the exact same number Windows
     // would report. Falls through on dirty/hibernated volumes (Fast Startup).
     if let Some(out) = run_with_timeout(
-        Command::new("ntfsresize").args([
-            "--info",
-            "--force",
-            "--no-progress-bar",
-        ]).arg(dev),
+        Command::new("ntfsresize")
+            .args(["--info", "--force", "--no-progress-bar"])
+            .arg(dev),
         Duration::from_secs(8),
     ) {
         if let Some(used) = parse_ntfs_used(&out) {
@@ -116,7 +114,9 @@ fn parse_ext_used(text: &str) -> Option<Bytes> {
 
 fn scan_kv(line: &str, key: &str) -> Option<u64> {
     let rest = line.strip_prefix(key)?.trim();
-    let end = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len());
+    let end = rest
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(rest.len());
     rest[..end].parse().ok()
 }
 

@@ -94,10 +94,17 @@ impl PartitionPreview {
         legend.set_use_markup(true);
         root.append(&legend);
 
-        Self { root, preview_area, legend, state }
+        Self {
+            root,
+            preview_area,
+            legend,
+            state,
+        }
     }
 
-    pub fn widget(&self) -> &GtkBox { &self.root }
+    pub fn widget(&self) -> &GtkBox {
+        &self.root
+    }
 
     pub fn set_disk(&self, disk: Option<Disk>) {
         let mut s = self.state.borrow_mut();
@@ -199,7 +206,8 @@ impl PartitionPreview {
             None => match &s.disk {
                 Some(d) => format!(
                     "<span foreground=\"#5a6a8a\"><small>{} · {}</small></span>",
-                    d.path.display(), d.size
+                    d.path.display(),
+                    d.size
                 ),
                 None => String::new(),
             },
@@ -209,19 +217,23 @@ impl PartitionPreview {
 }
 
 impl Default for PartitionPreview {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 // ── Legend markup ─────────────────────────────────────────────────────────────
 
 fn escape_markup(s: &str) -> String {
-    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 fn build_legend_markup(segs: &[PlannedSegment]) -> String {
     const MIN_LEGEND_BYTES: u64 = 10 * 1024 * 1024; // skip gaps < 10 MiB
-    // Small "boring" kept partitions (EFI, MSR, Recovery) clutter the legend;
-    // only include them if they're changing or at least 200 MiB.
+                                                    // Small "boring" kept partitions (EFI, MSR, Recovery) clutter the legend;
+                                                    // only include them if they're changing or at least 200 MiB.
     const SMALL_KEEP_THRESHOLD: u64 = 200 * 1024 * 1024;
     let mut parts: Vec<String> = Vec::new();
     for s in segs {
@@ -308,8 +320,11 @@ fn compute_visual(segs: &[PlannedSegment], total: u64, available: f64) -> Vec<(f
     let mut deficit = 0.0f64;
     let mut elastic_sum = 0.0f64;
     for &w in &widths {
-        if w < MIN_SEG_PX { deficit += MIN_SEG_PX - w; }
-        else               { elastic_sum += w; }
+        if w < MIN_SEG_PX {
+            deficit += MIN_SEG_PX - w;
+        } else {
+            elastic_sum += w;
+        }
     }
     if deficit > 0.0 && elastic_sum > deficit {
         let scale = (elastic_sum - deficit) / elastic_sum;
@@ -346,7 +361,10 @@ fn draw_empty(cr: &Context, w: i32, h: i32) {
 
 fn draw_strip(cr: &Context, w: i32, h: i32, segs: &[PlannedSegment], total: u64) {
     let (w, h) = (w as f64, h as f64);
-    if total == 0 { draw_empty(cr, w as i32, h as i32); return; }
+    if total == 0 {
+        draw_empty(cr, w as i32, h as i32);
+        return;
+    }
 
     let available = w - 2.0; // 1 px border on each side
     let layout = compute_visual(segs, total, available);
@@ -428,8 +446,10 @@ fn draw_drag_handle(cr: &Context, x: f64, h: f64) {
     // Two grip lines
     cr.set_source_rgb(0.40, 0.40, 0.40);
     cr.set_line_width(1.8);
-    cr.move_to(x - 2.5, cy - 7.0); cr.line_to(x - 2.5, cy + 7.0);
-    cr.move_to(x + 2.5, cy - 7.0); cr.line_to(x + 2.5, cy + 7.0);
+    cr.move_to(x - 2.5, cy - 7.0);
+    cr.line_to(x - 2.5, cy + 7.0);
+    cr.move_to(x + 2.5, cy - 7.0);
+    cr.line_to(x + 2.5, cy + 7.0);
     let _ = cr.stroke();
 }
 
@@ -452,27 +472,25 @@ fn draw_diagonal_hatch(cr: &Context, x: f64, y: f64, w: f64, h: f64) {
 /// (dark_fill, bright_used) RGB pair for a partition role.
 fn role_pair(role: PartitionRole) -> ((f64, f64, f64), (f64, f64, f64)) {
     match role {
-        PartitionRole::WindowsSystem | PartitionRole::WindowsData =>
-            ((0.130, 0.220, 0.420), (0.290, 0.560, 0.960)),
-        PartitionRole::EfiSystem =>
-            ((0.100, 0.280, 0.340), (0.270, 0.700, 0.760)),
-        PartitionRole::MicrosoftReserved | PartitionRole::WindowsRecovery =>
-            ((0.160, 0.210, 0.310), (0.280, 0.330, 0.430)),
-        PartitionRole::Linux =>
-            ((0.090, 0.300, 0.300), (0.227, 0.637, 0.760)),
-        PartitionRole::LinuxSwap =>
-            ((0.480, 0.380, 0.120), (0.960, 0.760, 0.320)),
-        PartitionRole::Other =>
-            ((0.180, 0.210, 0.290), (0.330, 0.380, 0.480)),
+        PartitionRole::WindowsSystem | PartitionRole::WindowsData => {
+            ((0.130, 0.220, 0.420), (0.290, 0.560, 0.960))
+        }
+        PartitionRole::EfiSystem => ((0.100, 0.280, 0.340), (0.270, 0.700, 0.760)),
+        PartitionRole::MicrosoftReserved | PartitionRole::WindowsRecovery => {
+            ((0.160, 0.210, 0.310), (0.280, 0.330, 0.430))
+        }
+        PartitionRole::Linux => ((0.090, 0.300, 0.300), (0.227, 0.637, 0.760)),
+        PartitionRole::LinuxSwap => ((0.480, 0.380, 0.120), (0.960, 0.760, 0.320)),
+        PartitionRole::Other => ((0.180, 0.210, 0.290), (0.330, 0.380, 0.480)),
     }
 }
 
 fn rounded_rect(cr: &Context, x: f64, y: f64, w: f64, h: f64, r: f64) {
     let pi = std::f64::consts::PI;
     cr.new_sub_path();
-    cr.arc(x + w - r, y + r,     r, -pi / 2.0,  0.0);
-    cr.arc(x + w - r, y + h - r, r,  0.0,        pi / 2.0);
-    cr.arc(x + r,     y + h - r, r,  pi / 2.0,   pi);
-    cr.arc(x + r,     y + r,     r,  pi,          1.5 * pi);
+    cr.arc(x + w - r, y + r, r, -pi / 2.0, 0.0);
+    cr.arc(x + w - r, y + h - r, r, 0.0, pi / 2.0);
+    cr.arc(x + r, y + h - r, r, pi / 2.0, pi);
+    cr.arc(x + r, y + r, r, pi, 1.5 * pi);
     cr.close_path();
 }

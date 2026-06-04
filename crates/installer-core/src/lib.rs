@@ -7,6 +7,7 @@
 pub mod bootloader;
 pub mod disk;
 pub mod install_size;
+pub mod live;
 pub mod ntfs_raw;
 pub mod plan;
 pub mod planner;
@@ -18,10 +19,11 @@ pub mod usage_probe;
 
 pub use bootloader::{Bootloader, Firmware};
 pub use disk::{Disk, Partition, PartitionRole, TableType};
+pub use install_size::{live_source_dirs, min_install_size};
+pub use live::LiveMedia;
 pub use plan::{Plan, Step, StepCategory};
 pub use planner::{InstallMode, InstallPlanner};
 pub use resize::{NtfsInfo, ResizePlanner};
-pub use install_size::{live_source_dirs, min_install_size};
 pub use scan::DiskScanner;
 pub use scenario::Scenario;
 pub use size::Bytes;

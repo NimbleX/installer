@@ -10,4 +10,11 @@ pub enum Scenario {
     /// Shrink an existing Windows NTFS partition and install Nimblex into the
     /// reclaimed space, leaving Windows bootable.
     AlongsideWindows,
+    /// Install Nimblex into existing unallocated space on the disk without
+    /// modifying any existing partition (used when Windows is BitLocker
+    /// encrypted but a large enough gap already exists).
+    FreeSpace,
+    /// Reformat and reuse an existing Nimblex partition left by a previous
+    /// (possibly failed) install. No partitioning, no changes to Windows.
+    ReuseExisting,
 }

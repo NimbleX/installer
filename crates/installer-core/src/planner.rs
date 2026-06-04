@@ -359,10 +359,282 @@ impl InstallPlanner {
         })
     }
 
+    /// Emit a plan that installs Nimblex into the largest unallocated gap
+    /// on `disk`, without modifying any existing partition. Reuses the
+    /// disk's existing ESP for the Nimblex EFI files.
+    ///
+    /// Used for disks where Windows is BitLocker-encrypted (so the
+    /// `AlongsideWindows` shrink path is not safe) but a large enough
+    /// unallocated gap already exists. The gap may sit *between* existing
+    /// partitions (e.g. Windows was previously shrunk, leaving free space
+    /// before a trailing recovery partition), not just at the disk tail.
+    pub fn plan_free_space(disk: &Disk, bootloader: Bootloader) -> Result<Plan> {
+        let bootloader = match bootloader {
+            Bootloader::Auto => bootloader.resolve(Firmware::detect()),
+            other => other,
+        };
+        let gap = disk
+            .largest_free_gap()
+            .ok_or_else(|| anyhow!("{} has no unallocated space", disk.path.display()))?;
+        let free = Bytes(gap.size);
+        let need = min_install();
+        if free < need {
+            return Err(anyhow!(
+                "largest free gap on {} is only {}, need at least {}",
+                disk.path.display(),
+                free,
+                need
+            ));
+        }
+        let after_number = gap.after_number.ok_or_else(|| {
+            anyhow!(
+                "free gap on {} is before the first partition; unsupported",
+                disk.path.display()
+            )
+        })?;
+        let esp = disk
+            .partitions
+            .iter()
+            .find(|p| matches!(p.role, PartitionRole::EfiSystem))
+            .ok_or_else(|| anyhow!("no ESP found on {}", disk.path.display()))?;
+
+        let dev = disk.path.display().to_string();
+        // parted assigns the new GPT entry the first free slot index, which
+        // (with slots 1..=N already used) is N + 1 — regardless of where
+        // the partition sits physically on the disk.
+        let new_part_num = disk.partitions.iter().map(|p| p.number).max().unwrap_or(0) + 1;
+        let new_part = format!("{}{}", dev, partsep(&dev, new_part_num));
+
+        let steps = vec![
+            Step {
+                label: "Create Nimblex partition in free space".into(),
+                category: StepCategory::Partition,
+                argv: vec![
+                    "nimblex-installer-helper-internal".into(),
+                    "mkpart-after".into(),
+                    "--disk".into(),
+                    dev.clone(),
+                    "--after-number".into(),
+                    after_number.to_string(),
+                    "--label".into(),
+                    "NIMBLEX".into(),
+                ],
+                critical: true,
+                destructive: true,
+                weight: 0.5,
+            },
+            Step {
+                label: "Format Nimblex partition".into(),
+                category: StepCategory::Format,
+                argv: vec![
+                    "mkfs.ext4".into(),
+                    "-F".into(),
+                    "-O".into(),
+                    "64bit".into(),
+                    "-L".into(),
+                    "NIMBLEX_ROOT".into(),
+                    new_part.clone(),
+                ],
+                critical: true,
+                destructive: true,
+                weight: 3.0,
+            },
+            Step {
+                label: "Copy Nimblex bundles".into(),
+                category: StepCategory::Copy,
+                argv: vec![
+                    "nimblex-installer-helper-internal".into(),
+                    "copy-system".into(),
+                    "--root".into(),
+                    new_part.clone(),
+                ],
+                critical: true,
+                destructive: true,
+                weight: 60.0,
+            },
+            Step {
+                label: format!("Install bootloader ({}) to existing ESP", bootloader),
+                category: StepCategory::Bootloader,
+                argv: vec![
+                    "nimblex-installer-helper-internal".into(),
+                    "install-boot-internal".into(),
+                    "--esp".into(),
+                    esp.path.display().to_string(),
+                    "--root".into(),
+                    new_part.clone(),
+                    "--bootloader".into(),
+                    bootloader.to_string(),
+                ],
+                critical: true,
+                destructive: true,
+                weight: 8.0,
+            },
+            Step {
+                label: "Flush and finalise".into(),
+                category: StepCategory::Finalise,
+                argv: vec!["sync".into()],
+                critical: true,
+                destructive: false,
+                weight: 2.0,
+            },
+        ];
+
+        Ok(Plan {
+            scenario: Scenario::FreeSpace,
+            target_disk: disk.path.clone(),
+            shrink_partition: None,
+            shrink_to: None,
+            new_root_partition: Some(PathBuf::from(new_part)),
+            new_root_size: free,
+            steps,
+        })
+    }
+
+    /// Emit a plan that **reuses** an existing Nimblex partition created by a
+    /// previous (possibly failed) install: copy the system into it and install
+    /// the bootloader to the existing ESP. No partitioning step — the
+    /// partition already exists. Touches no other partition (Windows, MSR,
+    /// WinRE all preserved).
+    ///
+    /// When `format` is `true` the partition is reformatted (mkfs.ext4)
+    /// before the copy, wiping any existing data. When `false` (the default
+    /// for a compatible existing partition) the new system is copied straight
+    /// onto the partition in place, preserving the existing filesystem.
+    ///
+    /// When `inplace_live` is `true` the target partition is the device the
+    /// running session booted from. In that case we must NOT unmount it (it
+    /// backs the live overlay) and we must NOT format it; the copy step uses
+    /// the crash-safe `--inplace-live` atomic-rename strategy so the running
+    /// kernel keeps reading the old (unlinked) bundle inodes until reboot.
+    pub fn plan_reuse(
+        disk: &Disk,
+        bootloader: Bootloader,
+        format: bool,
+        inplace_live: bool,
+    ) -> Result<Plan> {
+        let bootloader = match bootloader {
+            Bootloader::Auto => bootloader.resolve(Firmware::detect()),
+            other => other,
+        };
+        let part = disk
+            .existing_nimblex_partition()
+            .ok_or_else(|| anyhow!("no existing Nimblex partition on {}", disk.path.display()))?;
+        let esp = disk
+            .partitions
+            .iter()
+            .find(|p| matches!(p.role, PartitionRole::EfiSystem))
+            .ok_or_else(|| anyhow!("no ESP found on {}", disk.path.display()))?;
+        let part_path = part.path.display().to_string();
+
+        // In-place reinstall onto the running partition can neither unmount
+        // nor reformat the live medium; both would crash the session.
+        let format = format && !inplace_live;
+
+        let mut steps = Vec::new();
+
+        // Only unmount when we are NOT operating on the live partition.
+        // Detaching the mount that backs the running union is fatal.
+        if !inplace_live {
+            steps.push(Step {
+                label: "Unmount target partition".into(),
+                category: StepCategory::Format,
+                argv: vec![
+                    "nimblex-installer-helper-internal".into(),
+                    "unmount-target".into(),
+                    "--root".into(),
+                    part_path.clone(),
+                ],
+                critical: true,
+                destructive: false,
+                weight: 1.0,
+            });
+        }
+
+        if format {
+            steps.push(Step {
+                label: "Reformat existing Nimblex partition".into(),
+                category: StepCategory::Format,
+                argv: vec![
+                    "mkfs.ext4".into(),
+                    "-F".into(),
+                    "-O".into(),
+                    "64bit".into(),
+                    "-L".into(),
+                    "NIMBLEX_ROOT".into(),
+                    part_path.clone(),
+                ],
+                critical: true,
+                destructive: true,
+                weight: 3.0,
+            });
+        }
+
+        // The copy step gets the crash-safe strategy flag on the live path.
+        let mut copy_argv = vec![
+            "nimblex-installer-helper-internal".into(),
+            "copy-system".into(),
+            "--root".into(),
+            part_path.clone(),
+        ];
+        if inplace_live {
+            copy_argv.push("--inplace-live".into());
+        }
+        let copy_label = if inplace_live {
+            "Copy Nimblex bundles (crash-safe in-place)".to_string()
+        } else {
+            "Copy Nimblex bundles".to_string()
+        };
+
+        steps.extend([
+            Step {
+                label: copy_label,
+                category: StepCategory::Copy,
+                argv: copy_argv,
+                critical: true,
+                destructive: true,
+                weight: 60.0,
+            },
+            Step {
+                label: format!("Install bootloader ({}) to existing ESP", bootloader),
+                category: StepCategory::Bootloader,
+                argv: vec![
+                    "nimblex-installer-helper-internal".into(),
+                    "install-boot-internal".into(),
+                    "--esp".into(),
+                    esp.path.display().to_string(),
+                    "--root".into(),
+                    part_path.clone(),
+                    "--bootloader".into(),
+                    bootloader.to_string(),
+                ],
+                critical: true,
+                destructive: true,
+                weight: 8.0,
+            },
+            Step {
+                label: "Flush and finalise".into(),
+                category: StepCategory::Finalise,
+                argv: vec!["sync".into()],
+                critical: true,
+                destructive: false,
+                weight: 2.0,
+            },
+        ]);
+
+        Ok(Plan {
+            scenario: Scenario::ReuseExisting,
+            target_disk: disk.path.clone(),
+            shrink_partition: None,
+            shrink_to: None,
+            new_root_partition: Some(PathBuf::from(part_path)),
+            new_root_size: part.size,
+            steps,
+        })
+    }
+
     /// Single dispatch entry point used by the GUI. Picks `plan_usb` or
     /// `plan_alongside_windows` based on `mode` and auto-selects the Windows
     /// partition via [`Disk::primary_windows_partition`].
-    ///
     /// `reclaim_bytes` is interpreted only in [`InstallMode::Alongside`]:
     /// it is the amount of space to take from the Windows partition for
     /// Nimblex.  The shrink target is `windows.size - reclaim_bytes`.
@@ -371,6 +643,8 @@ impl InstallPlanner {
         mode: InstallMode,
         reclaim_bytes: Option<u64>,
         bootloader: Bootloader,
+        reuse_format: bool,
+        reuse_inplace_live: bool,
     ) -> Result<Plan> {
         // Resolve once at the entry point; downstream sees only concrete values.
         let bootloader = match bootloader {
@@ -383,15 +657,17 @@ impl InstallPlanner {
                 let win = disk
                     .primary_windows_partition()
                     .ok_or_else(|| anyhow!("no Windows partition on {}", disk.path.display()))?;
-                let reclaim = reclaim_bytes
-                    .map(Bytes)
-                    .unwrap_or_else(min_install);
+                let reclaim = reclaim_bytes.map(Bytes).unwrap_or_else(min_install);
                 let target = if reclaim >= win.size {
                     Bytes(0)
                 } else {
                     win.size - reclaim
                 };
                 Self::plan_alongside_windows(disk, win, target, bootloader)
+            }
+            InstallMode::FreeSpace => Self::plan_free_space(disk, bootloader),
+            InstallMode::ReuseNimblex => {
+                Self::plan_reuse(disk, bootloader, reuse_format, reuse_inplace_live)
             }
         }
     }
@@ -405,6 +681,16 @@ pub enum InstallMode {
     AlongsideWindows,
     /// Wipe the whole disk (USB stick or any disk the user explicitly chose).
     EraseWholeDisk,
+    /// Install into existing unallocated trailing space on the disk,
+    /// without touching any existing partition. Used when Windows is
+    /// BitLocker-encrypted (so we cannot shrink it) but the disk happens
+    /// to have a large enough free gap after the last partition. Reuses
+    /// the existing Windows ESP for the bootloader.
+    FreeSpace,
+    /// Reformat and reuse an existing Nimblex partition left by a previous
+    /// (possibly failed) install. No partitioning; reuses the existing ESP.
+    /// Lets a failed install be retried without needing free space.
+    ReuseNimblex,
 }
 
 /// Compute the `pX` separator: `nvme0n1` → `p`, `sda` → ``.
@@ -487,5 +773,152 @@ mod tests {
             "argv lacks grub flag: {}",
             joined
         );
+    }
+
+    fn fake_reuse_disk() -> Disk {
+        use crate::disk::{Partition, PartitionRole};
+        Disk {
+            path: "/dev/nvme0n1".into(),
+            size: Bytes::from_gib(512),
+            removable: false,
+            model: "Samsung SSD".into(),
+            transport: "nvme".into(),
+            table_type: TableType::Gpt,
+            partitions: vec![
+                Partition {
+                    path: "/dev/nvme0n1p1".into(),
+                    number: 1,
+                    start: Bytes::from_mib(1),
+                    size: Bytes::from_mib(512),
+                    label: "NIMBLEX_ESP".into(),
+                    fs: "vfat".into(),
+                    used: None,
+                    role: PartitionRole::EfiSystem,
+                    protected: false,
+                },
+                Partition {
+                    path: "/dev/nvme0n1p5".into(),
+                    number: 5,
+                    start: Bytes::from_gib(1),
+                    size: Bytes::from_gib(64),
+                    label: "NIMBLEX_ROOT".into(),
+                    fs: "ext4".into(),
+                    used: None,
+                    role: PartitionRole::Linux,
+                    protected: false,
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn reuse_plan_unmounts_target_before_reformat() {
+        let plan =
+            InstallPlanner::plan_reuse(&fake_reuse_disk(), Bootloader::SystemdBoot, true, false)
+                .unwrap();
+
+        // Step 1 must be the tolerant unmount of the target partition, and it
+        // must run *before* the mkfs.ext4 reformat — otherwise mke2fs refuses
+        // with "is mounted; will not make a filesystem here!".
+        let unmount = &plan.steps[0];
+        assert_eq!(unmount.argv[0], "nimblex-installer-helper-internal");
+        assert_eq!(unmount.argv[1], "unmount-target");
+        assert!(unmount.argv.iter().any(|a| a == "/dev/nvme0n1p5"));
+        assert!(
+            !unmount.destructive,
+            "unmount must not be marked destructive"
+        );
+
+        let reformat = &plan.steps[1];
+        assert_eq!(reformat.argv[0], "mkfs.ext4");
+        assert!(reformat.argv.iter().any(|a| a == "/dev/nvme0n1p5"));
+    }
+
+    #[test]
+    fn reuse_plan_without_format_skips_mkfs() {
+        // Default for a compatible existing partition: install in place,
+        // no reformat. The plan must still unmount, copy and install boot,
+        // but must NOT contain any mkfs.* step (no destructive format).
+        let plan =
+            InstallPlanner::plan_reuse(&fake_reuse_disk(), Bootloader::SystemdBoot, false, false)
+                .unwrap();
+
+        // First step is still the tolerant unmount.
+        let unmount = &plan.steps[0];
+        assert_eq!(unmount.argv[1], "unmount-target");
+
+        // No mkfs anywhere.
+        assert!(
+            !plan.steps.iter().any(|s| s.argv[0].starts_with("mkfs")),
+            "in-place reuse must not reformat the partition"
+        );
+
+        // Copy + bootloader steps still present.
+        let cats: Vec<_> = plan.steps.iter().map(|s| s.category).collect();
+        assert!(cats.contains(&StepCategory::Copy));
+        assert!(cats.contains(&StepCategory::Bootloader));
+    }
+
+    #[test]
+    fn reuse_plan_inplace_live_skips_unmount_and_flags_copy() {
+        // In-place reinstall onto the running partition: must NOT unmount the
+        // live partition, must NOT format it (even if asked), and the copy
+        // step must carry --inplace-live so the helper uses the crash-safe
+        // atomic-rename strategy.
+        let plan = InstallPlanner::plan_reuse(
+            &fake_reuse_disk(),
+            Bootloader::SystemdBoot,
+            true, // request format — must be ignored on the live path
+            true, // inplace_live
+        )
+        .unwrap();
+
+        // No unmount-target step (detaching the live mount is fatal).
+        assert!(
+            !plan
+                .steps
+                .iter()
+                .any(|s| s.argv.iter().any(|a| a == "unmount-target")),
+            "in-place live reinstall must not unmount the running partition"
+        );
+
+        // No mkfs even though format was requested.
+        assert!(
+            !plan.steps.iter().any(|s| s.argv[0].starts_with("mkfs")),
+            "the live partition can never be reformatted"
+        );
+
+        // The copy step carries --inplace-live.
+        let copy = plan
+            .steps
+            .iter()
+            .find(|s| s.argv.iter().any(|a| a == "copy-system"))
+            .expect("copy-system step present");
+        assert!(
+            copy.argv.iter().any(|a| a == "--inplace-live"),
+            "copy step must request the crash-safe strategy"
+        );
+
+        // The summary reflects the in-place path.
+        assert!(plan.summary_one_line().contains("in place"));
+    }
+
+    #[test]
+    fn reuse_plan_normal_path_has_no_inplace_flag() {
+        let plan =
+            InstallPlanner::plan_reuse(&fake_reuse_disk(), Bootloader::SystemdBoot, false, false)
+                .unwrap();
+        assert!(
+            !plan
+                .steps
+                .iter()
+                .any(|s| s.argv.iter().any(|a| a == "--inplace-live")),
+            "non-live reuse must not use the in-place flag"
+        );
+        // And it DOES unmount in the normal case.
+        assert!(plan
+            .steps
+            .iter()
+            .any(|s| s.argv.iter().any(|a| a == "unmount-target")));
     }
 }

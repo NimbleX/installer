@@ -102,10 +102,22 @@ pub fn disk_card(disk: &Disk) -> ToggleButton {
     meta.set_max_width_chars(28);
     text.append(&meta);
 
-    // Mini usage bar
-    let total_used: u64 = disk.partitions.iter().filter_map(|p| p.used.map(|b| b.0)).sum();
+    // Mini usage bar.
+    //
+    // Show how much of the disk holds DATA, so free/usable space is visible.
+    // Per partition: use the filesystem's reported `used` bytes when known;
+    // when unknown (BitLocker / unmounted / unsupported FS) fall back to the
+    // partition's full size, since we cannot see inside and must assume it is
+    // occupied. Unallocated gaps contribute nothing. This avoids both the old
+    // "always empty" bug (encrypted volumes report used = None) and the
+    // "always 100%" bug (a fully-partitioned disk is not necessarily full).
+    let used: u64 = disk
+        .partitions
+        .iter()
+        .map(|p| p.used.map(|u| u.0).unwrap_or(p.size.0))
+        .sum();
     let usage_fraction = if disk.size.0 > 0 {
-        (total_used as f64) / (disk.size.0 as f64)
+        (used as f64) / (disk.size.0 as f64)
     } else {
         0.0
     };

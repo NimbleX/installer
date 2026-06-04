@@ -36,7 +36,7 @@ impl Header {
         avatar.add_css_class("app-header-avatar");
         root.append(&avatar);
 
-        let title = Label::new(Some("Nimblex Installer"));
+        let title = Label::new(Some("NimbleX Installer"));
         title.add_css_class("app-header-title");
         title.set_halign(Align::Start);
         title.set_hexpand(true);

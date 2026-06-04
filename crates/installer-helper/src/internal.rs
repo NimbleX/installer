@@ -52,7 +52,22 @@ pub enum InternalCmd {
         label: String,
     },
     /// Mount `--root`, copy the live system bundles and boot files into it.
+    ///
+    /// With `--inplace-live` the target partition is the device the running
+    /// session booted from: files are replaced via write-temp-then-atomic-
+    /// rename so the live loop devices keep reading the old (unlinked) inodes
+    /// until reboot, and a free-space pre-check ensures both copies fit.
     CopySystem {
+        #[arg(long)]
+        root: PathBuf,
+        /// Use the crash-safe in-place strategy for the live boot partition.
+        #[arg(long, default_value_t = false)]
+        inplace_live: bool,
+    },
+    /// Unmount the target partition (and every mountpoint it backs) so it
+    /// can be reformatted in the reuse-existing scenario. Tolerant: succeeds
+    /// even if the partition is not currently mounted.
+    UnmountTarget {
         #[arg(long)]
         root: PathBuf,
     },
@@ -99,26 +114,47 @@ pub fn run(cli: InternalCli) -> Result<()> {
             require_block(&ntfs)?;
             cmd_check_fast_startup(&ntfs)
         }
-        InternalCmd::Resizepart { disk, number, size_bytes } => {
+        InternalCmd::Resizepart {
+            disk,
+            number,
+            size_bytes,
+        } => {
             require_block(&disk)?;
             cmd_resizepart(&disk, number, size_bytes)
         }
-        InternalCmd::MkpartAfter { disk, after_number, label } => {
+        InternalCmd::MkpartAfter {
+            disk,
+            after_number,
+            label,
+        } => {
             require_block(&disk)?;
             sanitize_label(&label)?;
             cmd_mkpart_after(&disk, after_number, &label)
         }
-        InternalCmd::CopySystem { root } => {
+        InternalCmd::CopySystem { root, inplace_live } => {
             require_block(&root)?;
-            cmd_copy_system(&root)
+            cmd_copy_system(&root, inplace_live)
         }
-        InternalCmd::InstallBootUsb { esp, root, disk, bootloader } => {
+        InternalCmd::UnmountTarget { root } => {
+            require_block(&root)?;
+            cmd_unmount_target(&root)
+        }
+        InternalCmd::InstallBootUsb {
+            esp,
+            root,
+            disk,
+            bootloader,
+        } => {
             require_block(&esp)?;
             require_block(&root)?;
             require_block(&disk)?;
             cmd_install_boot_usb(&esp, &root, &disk, bootloader)
         }
-        InternalCmd::InstallBootInternal { esp, root, bootloader } => {
+        InternalCmd::InstallBootInternal {
+            esp,
+            root,
+            bootloader,
+        } => {
             require_block(&esp)?;
             require_block(&root)?;
             cmd_install_boot_internal(&esp, &root, bootloader)
@@ -140,7 +176,8 @@ fn cmd_check_fast_startup(ntfs: &Path) -> Result<()> {
     // treat that as Fast Startup = on.
     let mount_ok = run_cmd_ok(&[
         "ntfs-3g",
-        "-o", "ro,recover,no_def_opts,noatime",
+        "-o",
+        "ro,recover,no_def_opts,noatime",
         &ntfs.to_string_lossy(),
         &mnt.to_string_lossy(),
     ]);
@@ -206,14 +243,22 @@ fn cmd_resizepart(disk: &Path, number: u32, size_bytes: u64) -> Result<()> {
 
     println!(
         "Resizing partition {} on {} to {} bytes (end = {})",
-        number, disk.display(), size_bytes, end_bytes
+        number,
+        disk.display(),
+        size_bytes,
+        end_bytes
     );
 
     run_cmd_check(&[
-        "parted", "--script", "--fix",
+        "parted",
+        "--script",
+        "--fix",
         &disk.to_string_lossy(),
-        "unit", "B",
-        "resizepart", &number.to_string(), &end_bytes.to_string(),
+        "unit",
+        "B",
+        "resizepart",
+        &number.to_string(),
+        &end_bytes.to_string(),
     ])?;
 
     // Update the kernel's view of the partition table.
@@ -226,9 +271,12 @@ fn cmd_resizepart(disk: &Path, number: u32, size_bytes: u64) -> Result<()> {
 fn get_partition_start(disk: &Path, number: u32) -> Result<u64> {
     let out = Command::new("parted")
         .args([
-            "--script", "--machine",
+            "--script",
+            "--machine",
             &disk.to_string_lossy(),
-            "unit", "B", "print",
+            "unit",
+            "B",
+            "print",
         ])
         .output()
         .context("parted print failed")?;
@@ -262,17 +310,41 @@ fn cmd_mkpart_after(disk: &Path, after_number: u32, label: &str) -> Result<()> {
     const MIB: u64 = 1024 * 1024;
     let start = (end + MIB - 1) / MIB * MIB;
 
+    // Determine the end of the gap. If another partition starts after our
+    // `start`, we must stop just before it (the free space is a gap BETWEEN
+    // partitions — e.g. a shrunk Windows followed by a recovery partition).
+    // Otherwise consume the rest of the disk ("100%").
+    let end_arg = match next_partition_start_after(disk, start)? {
+        Some(next_start) if next_start > start => {
+            // parted's end byte is inclusive; stop 1 byte before the next
+            // partition so the two never overlap. parted aligns down as
+            // needed.
+            format!("{}", next_start.saturating_sub(1))
+        }
+        _ => "100%".to_string(),
+    };
+
     println!(
-        "Creating partition on {} starting at {} bytes (after partition {}, label={}).",
-        disk.display(), start, after_number, label
+        "Creating partition on {} from {} to {} (after partition {}, label={}).",
+        disk.display(),
+        start,
+        end_arg,
+        after_number,
+        label
     );
 
     run_cmd_check(&[
-        "parted", "--script", "--fix",
+        "parted",
+        "--script",
+        "--fix",
         &disk.to_string_lossy(),
-        "unit", "B",
-        "mkpart", label, "ext4",
-        &start.to_string(), "100%",
+        "unit",
+        "B",
+        "mkpart",
+        label,
+        "ext4",
+        &start.to_string(),
+        &end_arg,
     ])?;
 
     run_cmd_check(&["partprobe", &disk.to_string_lossy()])?;
@@ -280,13 +352,48 @@ fn cmd_mkpart_after(disk: &Path, after_number: u32, label: &str) -> Result<()> {
     Ok(())
 }
 
+/// Return the start byte of the first partition whose start is strictly
+/// greater than `offset`, i.e. the partition bounding a free gap on its
+/// right. `None` if no partition starts after `offset` (gap runs to the
+/// end of the disk).
+fn next_partition_start_after(disk: &Path, offset: u64) -> Result<Option<u64>> {
+    let out = Command::new("parted")
+        .args([
+            "--script",
+            "--machine",
+            &disk.to_string_lossy(),
+            "unit",
+            "B",
+            "print",
+        ])
+        .output()
+        .context("parted print failed")?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut best: Option<u64> = None;
+    for line in text.lines() {
+        let fields: Vec<&str> = line.split(':').collect();
+        if fields.len() >= 3 && fields[0].trim().parse::<u32>().is_ok() {
+            let start_str = fields[1].trim_end_matches('B');
+            if let Ok(start) = start_str.parse::<u64>() {
+                if start > offset {
+                    best = Some(best.map_or(start, |b| b.min(start)));
+                }
+            }
+        }
+    }
+    Ok(best)
+}
+
 /// Return the end byte of partition `number`.
 fn get_partition_end(disk: &Path, number: u32) -> Result<u64> {
     let out = Command::new("parted")
         .args([
-            "--script", "--machine",
+            "--script",
+            "--machine",
             &disk.to_string_lossy(),
-            "unit", "B", "print",
+            "unit",
+            "B",
+            "print",
         ])
         .output()
         .context("parted print failed")?;
@@ -308,33 +415,86 @@ fn get_partition_end(disk: &Path, number: u32) -> Result<u64> {
     anyhow::bail!("partition {} not found on {}", number, disk.display())
 }
 
+// ── unmount-target ────────────────────────────────────────────────────────────
+
+/// Unmount every mountpoint backed by `dev` so it can be reformatted.
+///
+/// Used by the reuse-existing scenario: the target Nimblex partition is
+/// frequently still mounted (auto-mounted by the desktop, or left over from a
+/// previous run), which makes `mkfs.ext4` refuse with
+/// "<dev> is mounted; will not make a filesystem here!".
+///
+/// Tolerant by design — returns `Ok(())` even when the partition is not
+/// mounted at all, so it is safe to run unconditionally before the format.
+fn cmd_unmount_target(dev: &Path) -> Result<()> {
+    let dev = dev.to_string_lossy().to_string();
+    let mounts = fs::read_to_string("/proc/mounts").unwrap_or_default();
+    let mut found = false;
+
+    for line in mounts.lines() {
+        let fields: Vec<&str> = line.splitn(3, ' ').collect();
+        if fields.len() >= 2 && fields[0] == dev {
+            found = true;
+            let mountpoint = fields[1];
+            println!("Unmounting {} → {}", dev, mountpoint);
+            if !run_cmd_ok(&["umount", mountpoint]) {
+                // Busy? detach lazily so the subsequent mkfs can proceed.
+                println!("  (busy; retrying with umount --lazy)");
+                let _ = run_cmd_ok(&["umount", "--lazy", mountpoint]);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+    }
+
+    if !found {
+        println!("{} is not mounted; nothing to unmount.", dev);
+    }
+
+    // Absorb the mount/umount events before the formatter opens the device.
+    let _ = run_cmd_silent(&["udevadm", "settle", "--timeout=5"]);
+    Ok(())
+}
+
 // ── copy-system ───────────────────────────────────────────────────────────────
 
-fn cmd_copy_system(root_dev: &Path) -> Result<()> {
+fn cmd_copy_system(root_dev: &Path, inplace_live: bool) -> Result<()> {
     let (bundles_src, boot_src) = live_source_dirs()
-        .context("Cannot find live system bundles. Is this a Nimblex live system?")?;
+        .context("Cannot find live system bundles. Is this a NimbleX live system?")?;
 
     let mnt = PathBuf::from("/tmp/nimblex-target");
     fs::create_dir_all(&mnt)?;
 
+    if inplace_live {
+        println!(
+            "In-place reinstall onto the live boot partition {} (crash-safe atomic copy).",
+            root_dev.display()
+        );
+    }
+
     println!("Mounting {} at {} ...", root_dev.display(), mnt.display());
-    run_cmd_check(&[
-        "mount", &root_dev.to_string_lossy(), &mnt.to_string_lossy(),
-    ])?;
+    run_cmd_check(&["mount", &root_dev.to_string_lossy(), &mnt.to_string_lossy()])?;
 
     // Ensure we unmount on exit even if we error out.
-    let result = copy_system_inner(&bundles_src, &boot_src, &mnt);
+    let result = copy_system_inner(&bundles_src, &boot_src, &mnt, inplace_live);
 
     println!("Syncing filesystem...");
     let _ = run_cmd_ok(&["sync"]);
 
     println!("Unmounting {}...", mnt.display());
+    // This unmounts only our private /tmp/nimblex-target mount. In the
+    // in-place case the live partition is still mounted at its real
+    // mountpoint (e.g. /), which we deliberately never touch.
     let _ = run_cmd_ok(&["umount", &mnt.to_string_lossy()]);
 
     result
 }
 
-fn copy_system_inner(bundles_src: &Path, boot_src: &Path, mnt: &Path) -> Result<()> {
+fn copy_system_inner(
+    bundles_src: &Path,
+    boot_src: &Path,
+    mnt: &Path,
+    inplace_live: bool,
+) -> Result<()> {
     // ── 1. Copy .lzm bundles to nimblex64/ ───────────────────────────────────
     let target_bundles = mnt.join("nimblex64");
     fs::create_dir_all(&target_bundles)?;
@@ -359,6 +519,32 @@ fn copy_system_inner(bundles_src: &Path, boot_src: &Path, mnt: &Path) -> Result<
         .map(|e| e.metadata().map(|m| m.len()).unwrap_or(0))
         .sum();
 
+    // ── Free-space pre-check ─────────────────────────────────────────────────
+    // Atomic-rename keeps the OLD inode's blocks allocated (the live loop
+    // device holds them open) until reboot, so the target transiently needs
+    // room for old + new bundles. Verify up front rather than failing
+    // halfway and leaving a partially-written install.
+    if inplace_live {
+        if let Some(avail) = available_bytes(mnt) {
+            // We need the new bundles to fit *alongside* whatever is already
+            // there. The existing-bundle bytes are already on disk, so the
+            // additional requirement is the new total plus a small margin.
+            let needed = total_bytes_all + (total_bytes_all / 20) + 64 * 1024 * 1024;
+            if avail < needed {
+                anyhow::bail!(
+                    "Not enough free space for a crash-safe in-place reinstall: \
+                     {} MiB free, need about {} MiB more (the old copy must remain \
+                     until you reboot). Free space on the partition, or reboot with \
+                     the 'Copy to RAM' option and reinstall with formatting.",
+                    avail / 1024 / 1024,
+                    needed / 1024 / 1024,
+                );
+            }
+        } else {
+            println!("Warning: could not determine free space on target; proceeding.");
+        }
+    }
+
     println!(
         "Copying {} bundle(s) ({} MiB total) from {} ...",
         entries.len(),
@@ -370,10 +556,12 @@ fn copy_system_inner(bundles_src: &Path, boot_src: &Path, mnt: &Path) -> Result<
     let mut total_copied: u64 = 0;
     let mut last_pct: u32 = 0;
     let mut buf = vec![0u8; 4 * 1024 * 1024];
+    let mut written_names: Vec<std::ffi::OsString> = Vec::new();
 
     for entry in &entries {
         let src = entry.path();
-        let dst = target_bundles.join(entry.file_name());
+        let fname = entry.file_name();
+        let dst = target_bundles.join(&fname);
         let file_size = entry.metadata().map(|m| m.len()).unwrap_or(0);
         println!(
             "  {} ({} MiB)",
@@ -381,27 +569,45 @@ fn copy_system_inner(bundles_src: &Path, boot_src: &Path, mnt: &Path) -> Result<
             file_size / 1024 / 1024
         );
 
-        let mut src_f = File::open(&src)
-            .with_context(|| format!("open {}", src.display()))?;
-        let mut dst_f = File::create(&dst)
-            .with_context(|| format!("create {}", dst.display()))?;
-
-        loop {
-            let n = src_f.read(&mut buf)?;
-            if n == 0 { break; }
-            dst_f.write_all(&buf[..n])?;
-            total_copied += n as u64;
-            if total_bytes_all > 0 {
-                let pct = (total_copied * 100 / total_bytes_all) as u32;
-                if pct >= last_pct + 2 {
-                    last_pct = pct;
-                    println!("PROGRESS:{}", pct);
+        // Always write to a temp file and atomically rename over the
+        // destination. This is the core safety property: if the destination
+        // is currently loop-mounted by the running live system, the old file
+        // keeps its inode (and blocks) until reboot while the directory entry
+        // flips to the new file — no in-place truncation, no corruption.
+        let tmp = target_bundles.join(format!(".{}.tmp", fname.to_string_lossy()));
+        let mut src_f = File::open(&src).with_context(|| format!("open {}", src.display()))?;
+        {
+            let mut dst_f =
+                File::create(&tmp).with_context(|| format!("create {}", tmp.display()))?;
+            loop {
+                let n = src_f.read(&mut buf)?;
+                if n == 0 {
+                    break;
+                }
+                dst_f.write_all(&buf[..n])?;
+                total_copied += n as u64;
+                if total_bytes_all > 0 {
+                    let pct = (total_copied * 100 / total_bytes_all) as u32;
+                    if pct >= last_pct + 2 {
+                        last_pct = pct;
+                        println!("PROGRESS:{}", pct);
+                    }
                 }
             }
+            dst_f.sync_all().ok();
         }
+        fs::rename(&tmp, &dst).with_context(|| format!("atomically place {}", dst.display()))?;
+        written_names.push(fname);
     }
 
+    fsync_dir(&target_bundles);
     println!("PROGRESS:100");
+
+    // Remove stale bundles left from a previous (different) install so a
+    // no-format reinstall can't end up with a mix of old and new module
+    // versions that won't boot. unlink is safe even for files the running
+    // system still has loop-mounted: the inode survives until reboot.
+    remove_stale(&target_bundles, &written_names, &[".lzm"]);
 
     // ── 2. Copy boot files (kernel + initrd) to boot/ ───────────────────────
     let target_boot = mnt.join("boot");
@@ -409,9 +615,11 @@ fn copy_system_inner(bundles_src: &Path, boot_src: &Path, mnt: &Path) -> Result<
 
     println!(
         "Copying boot files from {} to {} ...",
-        boot_src.display(), target_boot.display()
+        boot_src.display(),
+        target_boot.display()
     );
 
+    let mut boot_written: Vec<std::ffi::OsString> = Vec::new();
     for entry in fs::read_dir(boot_src)
         .with_context(|| format!("cannot read {}", boot_src.display()))?
         .flatten()
@@ -422,13 +630,82 @@ fn copy_system_inner(bundles_src: &Path, boot_src: &Path, mnt: &Path) -> Result<
         }
         let fname = entry.file_name();
         let dst = target_boot.join(&fname);
+        let tmp = target_boot.join(format!(".{}.tmp", fname.to_string_lossy()));
         println!("  {}", fname.to_string_lossy());
-        fs::copy(&src, &dst)
-            .with_context(|| format!("failed to copy {}", src.display()))?;
+        fs::copy(&src, &tmp).with_context(|| format!("failed to copy {}", src.display()))?;
+        if let Ok(f) = File::open(&tmp) {
+            f.sync_all().ok();
+        }
+        fs::rename(&tmp, &dst).with_context(|| format!("atomically place {}", dst.display()))?;
+        boot_written.push(fname);
     }
+    fsync_dir(&target_boot);
+
+    // Drop obsolete kernels/initrds from a previous install in the no-format
+    // path so the bootloader doesn't pick up a stale, module-mismatched kernel.
+    remove_stale(
+        &target_boot,
+        &boot_written,
+        &["vmlinuz", "initramfs", "initrd"],
+    );
 
     println!("System copy complete.");
     Ok(())
+}
+
+/// Remove files in `dir` that were not just written, matching the given
+/// name prefixes/suffixes. `keep` holds the basenames we placed this run.
+/// Used to purge stale `.lzm` bundles and obsolete kernels/initrds on a
+/// no-format reinstall. Tolerant: individual removal errors are ignored.
+fn remove_stale(dir: &Path, keep: &[std::ffi::OsString], patterns: &[&str]) {
+    let entries = match fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        if keep.iter().any(|k| k == &name) {
+            continue;
+        }
+        let s = name.to_string_lossy();
+        // Skip our own in-progress temp files.
+        if s.starts_with('.') && s.ends_with(".tmp") {
+            continue;
+        }
+        let matches = patterns.iter().any(|p| {
+            if p.starts_with('.') {
+                s.ends_with(p)
+            } else {
+                s.starts_with(p)
+            }
+        });
+        if matches && entry.path().is_file() {
+            println!("  removing stale {}", s);
+            let _ = fs::remove_file(entry.path());
+        }
+    }
+}
+
+/// fsync a directory so a rename/unlink is durable. Best-effort.
+fn fsync_dir(dir: &Path) {
+    if let Ok(f) = File::open(dir) {
+        let _ = f.sync_all();
+    }
+}
+
+/// Available bytes on the filesystem mounted at `mnt`, via `df`. `None` if
+/// it cannot be determined.
+fn available_bytes(mnt: &Path) -> Option<u64> {
+    let out = Command::new("df")
+        .args(["-B1", "--output=avail", &mnt.to_string_lossy()])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    // Two lines: header "Avail" then the number.
+    text.lines().nth(1)?.trim().parse::<u64>().ok()
 }
 
 // ── install-boot-usb ─────────────────────────────────────────────────────────
@@ -440,7 +717,7 @@ fn cmd_install_boot_usb(
     bootloader: HelperBootloader,
 ) -> Result<()> {
     let (bundles_src, boot_src) = live_source_dirs()
-        .context("Cannot find live boot files. Is this a Nimblex live system?")?;
+        .context("Cannot find live boot files. Is this a NimbleX live system?")?;
 
     let (kernel, initrd) = pick_kernel_and_initrd(&bundles_src, &boot_src)?;
 
@@ -449,7 +726,9 @@ fn cmd_install_boot_usb(
 
     println!("Mounting ESP {} ...", esp_dev.display());
     run_cmd_check(&[
-        "mount", &esp_dev.to_string_lossy(), &mnt_esp.to_string_lossy(),
+        "mount",
+        &esp_dev.to_string_lossy(),
+        &mnt_esp.to_string_lossy(),
     ])?;
 
     let result = crate::boot::install_usb(bootloader, &mnt_esp, &kernel, &initrd, disk);
@@ -469,7 +748,7 @@ fn cmd_install_boot_internal(
     bootloader: HelperBootloader,
 ) -> Result<()> {
     let (bundles_src, boot_src) = live_source_dirs()
-        .context("Cannot find live boot files. Is this a Nimblex live system?")?;
+        .context("Cannot find live boot files. Is this a NimbleX live system?")?;
 
     let (kernel, initrd) = pick_kernel_and_initrd(&bundles_src, &boot_src)?;
 
@@ -478,17 +757,13 @@ fn cmd_install_boot_internal(
 
     println!("Mounting ESP {} ...", esp_dev.display());
     run_cmd_check(&[
-        "mount", &esp_dev.to_string_lossy(), &mnt_esp.to_string_lossy(),
+        "mount",
+        &esp_dev.to_string_lossy(),
+        &mnt_esp.to_string_lossy(),
     ])?;
 
-    let result = crate::boot::install_internal(
-        bootloader,
-        esp_dev,
-        &mnt_esp,
-        root_dev,
-        &kernel,
-        &initrd,
-    );
+    let result =
+        crate::boot::install_internal(bootloader, esp_dev, &mnt_esp, root_dev, &kernel, &initrd);
 
     println!("Syncing and unmounting ESP...");
     let _ = run_cmd_ok(&["sync"]);
@@ -550,8 +825,12 @@ fn pick_kernel_and_initrd(bundles_src: &Path, boot_src: &Path) -> Result<(PathBu
         }
     };
 
-    let initrd = find_newest_initrd(boot_src)
-        .with_context(|| format!("No initrd (initramfs*/initrd*) found in {}", boot_src.display()))?;
+    let initrd = find_newest_initrd(boot_src).with_context(|| {
+        format!(
+            "No initrd (initramfs*/initrd*) found in {}",
+            boot_src.display()
+        )
+    })?;
 
     println!("Selected kernel: {}", kernel.display());
     println!("Selected initrd: {}", initrd.display());
@@ -627,9 +906,15 @@ fn find_kernel_for_version(boot_src: &Path, version: &str) -> Option<PathBuf> {
             // non-digit chars (or string boundary).
             if let Some(idx) = s.find(version) {
                 let after = s.as_bytes().get(idx + version.len()).copied();
-                let before = if idx == 0 { None } else { s.as_bytes().get(idx - 1).copied() };
+                let before = if idx == 0 {
+                    None
+                } else {
+                    s.as_bytes().get(idx - 1).copied()
+                };
                 let ok_after = matches!(after, None | Some(b'-' | b'.' | b'_' | b'+'))
-                    || !after.map(|b| b.is_ascii_digit() || b == b'.').unwrap_or(false);
+                    || !after
+                        .map(|b| b.is_ascii_digit() || b == b'.')
+                        .unwrap_or(false);
                 let ok_before = matches!(before, None | Some(b'-' | b'.' | b'_'));
                 return ok_before && ok_after;
             }
@@ -661,8 +946,14 @@ fn find_newest_initrd(boot_src: &Path) -> Option<PathBuf> {
         .map(|e| e.path())
         .collect();
     candidates.sort_by(|a, b| {
-        let na = a.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        let nb = b.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let na = a
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let nb = b
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
         // "initramfs" before "initrd" (modern wins).
         let pa = na.starts_with("initramfs");
         let pb = nb.starts_with("initramfs");
@@ -672,7 +963,10 @@ fn find_newest_initrd(boot_src: &Path) -> Option<PathBuf> {
         let ta = fs::metadata(a).and_then(|m| m.modified()).ok();
         let tb = fs::metadata(b).and_then(|m| m.modified()).ok();
         // Sort descending: prefix true > false, then number desc, then mtime desc.
-        pb.cmp(&pa).then(kb.cmp(&ka)).then(tb.cmp(&ta)).then(nb.cmp(&na))
+        pb.cmp(&pa)
+            .then(kb.cmp(&ka))
+            .then(tb.cmp(&ta))
+            .then(nb.cmp(&na))
     });
     candidates.into_iter().next()
 }
@@ -693,12 +987,7 @@ fn find_newest(dir: &Path, prefix: &str) -> Option<PathBuf> {
     let mut candidates: Vec<_> = fs::read_dir(dir)
         .ok()?
         .flatten()
-        .filter(|e| {
-            e.file_name()
-                .to_string_lossy()
-                .starts_with(prefix)
-                && e.path().is_file()
-        })
+        .filter(|e| e.file_name().to_string_lossy().starts_with(prefix) && e.path().is_file())
         .collect();
     // Sort by mtime descending; fall back to name descending.
     candidates.sort_by(|a, b| {
@@ -809,7 +1098,13 @@ fn cmd_settle_partitions(disk: &Path, count: u32) -> Result<()> {
         );
     }
 
-    println!("Partitions ready: {}", (1..=count).map(|n| partition_path(&dev, n)).collect::<Vec<_>>().join(" "));
+    println!(
+        "Partitions ready: {}",
+        (1..=count)
+            .map(|n| partition_path(&dev, n))
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
 
     // Step 4 – lazily unmount any stale mounts on the new partition nodes.
     //
@@ -855,5 +1150,109 @@ fn partition_path(disk: &str, n: u32) -> String {
         format!("{}p{}", disk, n)
     } else {
         format!("{}{}", disk, n)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Create a unique throwaway directory under the system temp dir.
+    fn tmpdir(tag: &str) -> PathBuf {
+        let base = std::env::temp_dir().join(format!(
+            "nimblex-test-{}-{}-{}",
+            tag,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&base).unwrap();
+        base
+    }
+
+    fn write(p: &Path, bytes: &[u8]) {
+        if let Some(parent) = p.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        let mut f = File::create(p).unwrap();
+        f.write_all(bytes).unwrap();
+    }
+
+    #[test]
+    fn copy_system_inner_renames_and_purges_stale() {
+        let root = tmpdir("copy");
+        let bundles_src = root.join("src/nimblex64");
+        let boot_src = root.join("src/boot");
+        let mnt = root.join("target");
+        fs::create_dir_all(&bundles_src).unwrap();
+        fs::create_dir_all(&boot_src).unwrap();
+        fs::create_dir_all(&mnt).unwrap();
+
+        // Source bundles (alphabetical layer order) and boot files.
+        write(&bundles_src.join("01-Core64.lzm"), b"core-new");
+        write(&bundles_src.join("02-Xorg64.lzm"), b"xorg-new");
+        write(&bundles_src.join("ignore.skip"), b"nope"); // not a real .lzm
+        write(&boot_src.join("vmlinuz"), b"kernel-new");
+        write(&boot_src.join("initramfs.img"), b"initrd-new");
+
+        // Pre-existing target with an OLD version of a bundle (to be
+        // overwritten) and a STALE bundle/kernel that must be purged.
+        write(&mnt.join("nimblex64/01-Core64.lzm"), b"core-OLD-larger");
+        write(&mnt.join("nimblex64/99-Stale64.lzm"), b"stale");
+        write(&mnt.join("boot/vmlinuz-old"), b"stale-kernel");
+
+        copy_system_inner(&bundles_src, &boot_src, &mnt, false).unwrap();
+
+        // New content present and overwritten atomically.
+        assert_eq!(
+            fs::read(mnt.join("nimblex64/01-Core64.lzm")).unwrap(),
+            b"core-new"
+        );
+        assert_eq!(
+            fs::read(mnt.join("nimblex64/02-Xorg64.lzm")).unwrap(),
+            b"xorg-new"
+        );
+
+        // Stale bundle and stale kernel purged.
+        assert!(!mnt.join("nimblex64/99-Stale64.lzm").exists());
+        assert!(!mnt.join("boot/vmlinuz-old").exists());
+
+        // Boot files copied.
+        assert_eq!(fs::read(mnt.join("boot/vmlinuz")).unwrap(), b"kernel-new");
+        assert_eq!(
+            fs::read(mnt.join("boot/initramfs.img")).unwrap(),
+            b"initrd-new"
+        );
+
+        // No leftover temp files from the rename discipline.
+        for dir in [mnt.join("nimblex64"), mnt.join("boot")] {
+            for e in fs::read_dir(&dir).unwrap().flatten() {
+                let n = e.file_name();
+                let s = n.to_string_lossy();
+                assert!(
+                    !(s.starts_with('.') && s.ends_with(".tmp")),
+                    "leftover temp file: {}",
+                    s
+                );
+            }
+        }
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn remove_stale_keeps_written_and_temp_files() {
+        let dir = tmpdir("stale");
+        write(&dir.join("01-A.lzm"), b"a");
+        write(&dir.join("99-old.lzm"), b"old");
+        write(&dir.join(".01-A.lzm.tmp"), b"partial");
+        let keep = vec![std::ffi::OsString::from("01-A.lzm")];
+        remove_stale(&dir, &keep, &[".lzm"]);
+        assert!(dir.join("01-A.lzm").exists(), "written file kept");
+        assert!(!dir.join("99-old.lzm").exists(), "stale removed");
+        assert!(dir.join(".01-A.lzm.tmp").exists(), "temp file untouched");
+        let _ = fs::remove_dir_all(&dir);
     }
 }

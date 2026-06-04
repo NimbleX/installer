@@ -21,7 +21,10 @@ pub enum Event {
     /// Plan finished successfully.
     Complete,
     /// Hard error; the plan is aborted.
-    Error { index: Option<usize>, message: String },
+    Error {
+        index: Option<usize>,
+        message: String,
+    },
 }
 
 impl Event {
@@ -30,7 +33,10 @@ impl Event {
         // Should never fail for our types; if it does, surface a stub event
         // so callers don't have to handle Result on every emit.
         serde_json::to_string(self).unwrap_or_else(|e| {
-            format!(r#"{{"kind":"error","message":"event encode failed: {}"}}"#, e)
+            format!(
+                r#"{{"kind":"error","message":"event encode failed: {}"}}"#,
+                e
+            )
         })
     }
 
